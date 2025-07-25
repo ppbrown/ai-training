@@ -12,7 +12,7 @@ I wrote my own, instead of trying to mod one of those.
 # Subdirs
 
 The actual "train a model" scripts are under
-[training](/training/)
+[trainer](/trainer/)
 
 but before you train a mode, you need a dataset to train it on.
 So there are some relevant scripts for that under
