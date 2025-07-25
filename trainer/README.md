@@ -67,7 +67,7 @@ You can directly just call the backend "train_from_cached.py" if you like.
 However, you will probably prefer to use the convenience front-end wrapper.
 It also effectively functions as a configuration save file.
 
-Choose either train_sd.sh to train_t5.sh
+Choose either [train_sd.sh](train_sd.sh) or [train_t5.sh](train_t5.sh)
 
 Edit the variable assignments within, to match your preferences.
 Then run the script.
