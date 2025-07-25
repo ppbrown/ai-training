@@ -19,6 +19,7 @@ SCHED=constant
 #SCHED=cosine
 #SCHED=cosine_with_min_lr
 
+# Set GAMMA to non-zero int, to enable SNR
 #GAMMA=5
 STEPS=50000
 WARMUP=0
@@ -31,6 +32,10 @@ DATADIR="${DATADIR} /ANKER/LAION/LAION-23-womanonly-cancrop"
 MODEL="stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 OUTPUTDIR="sd_test_b${BATCH}a${ACCUM}_${LR}_${SCHED}${STEPS}"
+
+################################################################
+# You probably dont need to edit anything below here....
+################################################################
 
 if [[ "$GAMMA" != "" ]] ; then
 	USE_SNR="--use_snr --noise_gamma $GAMMA"
@@ -60,7 +65,5 @@ accelerate launch train_from_cached.py \
   --train_data_dir    $DATADIR 
 
 
-#  --use_snr \
-#  --sample_steps      10 \
 #  --reinit_unet \
 
