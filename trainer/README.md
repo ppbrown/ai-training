@@ -47,7 +47,7 @@ Note that some scripts expect to make use of the custom "diffusers pipeline" pre
 huggingface model "opendiffusionai/stablediffusion_t5"
 or "opendiffusionai/sdx_t5"
 
-Sample usage;
+Sample cache creation;
 
     ./create_img_sdxl.py --model opendiffusionai/stablediffusion_t5 --data_root /data --custom
 
