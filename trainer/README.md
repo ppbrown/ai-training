@@ -47,7 +47,7 @@ Note that some scripts expect to make use of the custom "diffusers pipeline" pre
 huggingface model "opendiffusionai/stablediffusion_t5"
 or "opendiffusionai/sdx_t5"
 
-Sample cache creation;
+Sample cache creation:
 
     ./create_img_sdxl.py --model opendiffusionai/stablediffusion_t5 --data_root /data --custom
 
@@ -72,7 +72,9 @@ Choose either [train_sd.sh](train_sd.sh) or [train_t5.sh](train_t5.sh)
 Edit the variable assignments within, to match your preferences.
 Then run the script.
 
-It takes care of calling the back-end train_from_cached.py
+It takes care of calling the back-end "train_from_cached.py" with decent arguments.
+
+It also takes care of setting the output directory name to something useful
 
 
 ## Benefits
