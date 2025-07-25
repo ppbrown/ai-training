@@ -3,13 +3,14 @@
 This directory holds my current attempts at a custom AI model training script,
 along with associated utilities and cache creation tools.
 
-In theory, these tools can be used to train standard SD1.5. Beyond that, 
-I am using the CLI tools in an attempt to train a model from scratch that has
+These tools can also be used to train standard SD1.5. 
+
+My main focus is using the CLI tools in an attempt to train a model that has
 the following components:
 
 * SDXL vae
 * T5 xxl text encoder
-* SD 1.5 vae
+* SD 1.5 unet
 
 I'm training this in bf16 precision and 512x512 images, because with this setup,
 I can run a native batch size of 64 on my rtx 4090, and get
@@ -21,7 +22,7 @@ The code is currently centered around SD1.5 training.
 See the "train_sd.sh" script for the vanilla version,
 or "train_t5.sh" for the fancier one.
 
-In theory the core loop could be modified for SDXL.
+In theory the core loop could be modified to work with SDXL.
 More work would be required to fit it for for any other model.
 
 Loosely speaking it uses the "diffusers" Pipeline methodology, at least in some places.
@@ -62,17 +63,17 @@ Sample usage;
 
 ## Training
 
+You can directly just call the backend "train_from_cached.py" if you like. 
+However, you will probably prefer to use the convenience front-end wrapper.
+It also effectively functions as a configuration save file.
+
 Choose either train_sd.sh to train_t5.sh
 
 Edit the variable assignments within, to match your preferences.
 Then run the script.
 
-
 It takes care of calling the back-end train_from_cached.py
 
-
-As noted above, I can just barely fit in a batch size of 64, on my 4090, using 512x512 resolution.
-(in this case represented as --resolution 512)
 
 ## Benefits
 
@@ -86,10 +87,9 @@ Benefits of this method over larger programs:
 
 When you have two seperate output directories with different settings...
 as long as you sampled at the same step interval, you can use the 
-"../dataset_scripts/compare_imgdirs.py"
-tool to show the same step from each directory side-by-side
+[../dataset_scripts/compare_imgdirs.py](../dataset_scripts/compare_imgdirs.py)
+tool to show the same sample images from each directory side-by-side
 
-You probably will not need the compare_tensorfiles.py tool
 
 # Square image limitation
 
