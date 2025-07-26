@@ -81,6 +81,9 @@ It also takes care of setting the output directory name to something useful
 Currently, it defaults to bf16 mixed precision.
 To force full fp32, set the --fp32 flag for the backend
 
+Generally speaking, if you are doing minor additions, bf16 is fine. 
+But if you are doing "serious work", you need to use fp32
+
 
 ## Benefits
 
