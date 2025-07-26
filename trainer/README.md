@@ -76,6 +76,11 @@ It takes care of calling the back-end "train_from_cached.py" with decent argumen
 
 It also takes care of setting the output directory name to something useful
 
+### Training precision
+
+Currently, it defaults to bf16 mixed precision.
+To force full fp32, set the --fp32 flag for the backend
+
 
 ## Benefits
 

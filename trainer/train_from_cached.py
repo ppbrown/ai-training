@@ -45,6 +45,8 @@ def parse_args():
                    help="enable grad checkpointing in unet")
     p.add_argument("--learning_rate",   type=float, default=1e-5, help="default=1e-5")
     p.add_argument("--min_learning_rate",   type=float, default=0.1, help="Only used if 'min_lr' type schedulers are used")
+    p.add_argument("--fp32", action="store_true",
+                   help="Override default mixed precision bf16")
     p.add_argument("--is_custom", action="store_true",
                    help="Model provides a 'custom pipeline'")
     p.add_argument("--weight_decay",   type=float)
@@ -128,11 +130,13 @@ def main():
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
-        mixed_precision="bf16" if torch.cuda.is_available() else "no",
+        mixed_precision="bf16" if not args.fp32 else "no",
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
     torch_dtype=torch.bfloat16 if accelerator.mixed_precision=="bf16" else torch.float32
+
+    print("Training type:",torch_dtype)
 
     # ----- load pipeline --------------------------------------------------- #
 
