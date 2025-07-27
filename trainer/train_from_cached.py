@@ -1,44 +1,15 @@
 #!/usr/bin/env python
 
-# Okay this is called "train_lion_" but you can actually override optimizer.
-# Currently it only supports
-#  --optimizer  adamw8
-
-import argparse, os, math, shutil
-from pathlib import Path
-from tqdm.auto import tqdm
-
-import torch
-import safetensors.torch as st
-from torch.utils.data import Dataset, DataLoader
-
-# This must be done before diffusers import
-# except... it doesnt actually work anyway?
-os.environ["TRANSFORMERS_NO_PROGRESS_BAR"] = "1"
+# train_with_caching.py
 
 
-from accelerate import Accelerator, DistributedDataParallelKwargs
-from diffusers import DiffusionPipeline, UNet2DConditionModel
-from diffusers import DDPMScheduler
-from diffusers.models.attention import Attention as CrossAttention
-from diffusers.training_utils import compute_snr
-
-# diffusers optimizers dont have a min_lr arg
-#from diffusers.optimization import get_scheduler
-from transformers import get_scheduler
-
-from torch.utils.tensorboard import SummaryWriter
-
-import lion_pytorch
-
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
 
 # --------------------------------------------------------------------------- #
 # 1. CLI                                                                      #
 # --------------------------------------------------------------------------- #
+import argparse
 def parse_args():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="directory tree(s) containing *.jpg + *.txt")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
@@ -85,6 +56,44 @@ def parse_args():
 
     return p.parse_args()
 
+
+# Put this super-early, so that usage message procs fast
+args = parse_args()
+
+# --------------------------------------------------------------------------- #
+
+# This must be done before diffusers import
+# except... it doesnt actually work anyway?
+os.environ["TRANSFORMERS_NO_PROGRESS_BAR"] = "1"
+import os, math, shutil
+from pathlib import Path
+from tqdm.auto import tqdm
+
+import torch
+import safetensors.torch as st
+from torch.utils.data import Dataset, DataLoader
+
+
+
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from diffusers import DiffusionPipeline, UNet2DConditionModel
+from diffusers import DDPMScheduler
+from diffusers.models.attention import Attention as CrossAttention
+from diffusers.training_utils import compute_snr
+
+# diffusers optimizers dont have a min_lr arg,
+# so dont use that scheduler
+#from diffusers.optimization import get_scheduler
+from transformers import get_scheduler
+
+from torch.utils.tensorboard import SummaryWriter
+
+import lion_pytorch
+
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+
+
 # --------------------------------------------------------------------------- #
 # 2. Dataset                                                                  #
 # --------------------------------------------------------------------------- #
@@ -127,7 +136,6 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
 #####################################################
 
 def main():
-    args = parse_args()
     torch.manual_seed(args.seed)
     peak_lr       = args.learning_rate
     warmup_steps  = args.warmup_steps
