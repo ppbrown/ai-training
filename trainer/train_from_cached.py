@@ -12,6 +12,11 @@ import torch
 import safetensors.torch as st
 from torch.utils.data import Dataset, DataLoader
 
+# This must be done before diffusers import
+# except... it doesnt actually work anyway?
+os.environ["TRANSFORMERS_NO_PROGRESS_BAR"] = "1"
+
+
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from diffusers import DiffusionPipeline, UNet2DConditionModel
 from diffusers import DDPMScheduler
@@ -104,6 +109,7 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
         torch_dtype=torch.bfloat16,
     )
     pipe.safety_checker=None
+    pipe.set_progress_bar_config(disable=True)
 
     pipe.enable_sequential_cpu_offload()
     generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -276,6 +282,9 @@ def main():
     )
 
     global_step    = 0
+    if args.gradient_accum >1:
+        accum_loss = 0
+
     run_name = os.path.basename(args.output_dir)
     tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
 
@@ -390,6 +399,13 @@ def main():
                     tb_writer.add_scalar("train/loss_raw", raw_mse_loss.item(), global_step)
                     tb_writer.add_scalar("train/learning_rate", current_lr, global_step)
                     tb_writer.add_scalar("train/qk_grads_av", qk_grad_sum, global_step)
+                    if args.gradient_accum >1:
+                        accum_loss += loss.item()
+                        if global_step % args.gradient_accum == 0:
+                            tb_writer.add_scalar("train/loss_batch", 
+                                                 accum_loss / args.gradient_accum, 
+                                                 global_step)
+                            accum_loss=0
 
             if (
                     accelerator.is_main_process
@@ -403,10 +419,24 @@ def main():
             torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
 
             global_step += 1
-            # We have to take into account gradient accumilation, IF used!!
+            # We have to take into account gradient accumilation!!
             # This is one reason it has to default to "1", not "0"
             if global_step % args.gradient_accum == 0:
                 optim.step(); lr_sched.step(); optim.zero_grad()
+
+                trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+                if os.path.exists(trigger_path):
+                    print("trigger.checkpoint detected. ...")
+                    # It is tempting to put this in the same place as the other save.
+                    # But, we want to include this one in the 
+                    #   "did we complete a full batch?"
+                    # logic
+                    checkpointandsave()
+                    try:
+                        os.remove(trigger_path)
+                    except Exception as e:
+                        print("warning: got exception", e)
+
 
             if global_step >= args.max_steps:
                 break
