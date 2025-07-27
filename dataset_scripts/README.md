@@ -13,7 +13,8 @@ has 3 tags, not 5
 
 
 * compare_imgdirs.py       - Given two directories, display images with same names side-by-side
-* count_tags.py            - Show distribution frequency of all tags
+* count_tags.py            - Show distribution frequency of all tags, CLI
+* count_tags_qt.py         - Show distribution frequency of all tags, GUI version
 * dataset2hex.py           - Organize image datasets into a standardized tree
 * extracttxtfromjsonl.py   - Util to add md5 sum of an image to its .json file
 * jsonupdatemd5.py         - Util to add md5 sum of an image to its .json file
