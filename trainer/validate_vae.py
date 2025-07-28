@@ -1,3 +1,10 @@
+#!/bin/env python
+
+# Purpose of this util is to use a VAE present in a Diffusers model, 
+# to first encode, then decode a specified image
+# It will display the result, so you can judge the quality of the VAE.
+
+
 import argparse
 from pathlib import Path
 import torch
@@ -12,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", help="Diffusers model directory or repo (must have VAE)",
                     default="/BLUE/t5-train/models/sdxl-orig")
-parser.add_argument("--file", required=True, help="Path to the latent .safetensors file")
+parser.add_argument("--image", required=True, help="Path to an image file")
 parser.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
 args = parser.parse_args()
 
@@ -27,7 +34,7 @@ pipe = DiffusionPipeline.from_pretrained(
 )
 vae_model = pipe.vae.to(device).eval()
 
-input_image = Image.open(args.file).convert("RGB")
+input_image = Image.open(args.image).convert("RGB")
 transform = transforms.Compose([
     transforms.Resize((512, 512)),  # Resize to 512x512 for consistency
     transforms.ToTensor(),
