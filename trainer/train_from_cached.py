@@ -420,7 +420,8 @@ def main():
                     accum_qk += qk_grad_sum
                     if global_step % args.gradient_accum == 0:
                         tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
-                        tb_writer.add_scalar("train/loss", accum_loss / args.gradient_accum, batch_count)
+                        if args.use_snr:
+                            tb_writer.add_scalar("train/loss_snr", accum_loss / args.gradient_accum, batch_count)
                         tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
                         tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
                         accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0
