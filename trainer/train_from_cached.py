@@ -11,33 +11,34 @@ import argparse
 def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
-    p.add_argument("--train_data_dir",  nargs="+", required=True,  help="directory tree(s) containing *.jpg + *.txt")
+    p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
-    p.add_argument("--copy_config",    type=str, help="config file to archive with training, if model load succeeds")
+    p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
     p.add_argument("--batch_size",     type=int, default=4)
-    p.add_argument("--gradient_accum", type=int, default=1, help="default=1")
+    p.add_argument("--gradient_accum", type=int, default=1, help="Default=1")
     p.add_argument('--gradient_checkpointing', action='store_true',
-                   help="enable grad checkpointing in unet")
-    p.add_argument("--learning_rate",   type=float, default=1e-5, help="default=1e-5")
+                   help="Enable grad checkpointing in unet")
+    p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
     p.add_argument("--min_learning_rate",   type=float, default=0.1, help="Only used if 'min_lr' type schedulers are used")
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision bf16")
     p.add_argument("--is_custom", action="store_true",
                    help="Model provides a 'custom pipeline'")
     p.add_argument("--weight_decay",   type=float)
-    p.add_argument("--vae_scaling_factor", type=float, help="override vae scaling factor")
+    p.add_argument("--vae_scaling_factor", type=float, help="Override vae scaling factor")
     p.add_argument("--text_scaling_factor", type=float, help="Override embedding scaling factor")
     p.add_argument("--learning_rate_decay", type=float,
                    help="Subtract this every epoch, if schedler==constant")
-    p.add_argument("--max_steps",       type=int, default=10_000, help="default=10_000")
+    p.add_argument("--max_steps",       type=int, default=10_000, 
+                   help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000")
     ex_group = p.add_mutually_exclusive_group()
-    ex_group.add_argument("--save_steps",    type=int)
+    ex_group.add_argument("--save_steps",    type=int, help="Measured in effective batchsize(b * a)")
     ex_group.add_argument("--save_on_epoch", action="store_true")
-    p.add_argument("--warmup_steps",    type=int, default=0, help="default=0")
+    p.add_argument("--warmup_steps",    type=int, default=0, help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--noise_gamma",     type=float, default=5.0)
     p.add_argument("--cpu_offload", action="store_true",
-                   help="enable cpu offload at pipe level")
+                   help="Enable cpu offload at pipe level")
     p.add_argument("--use_snr", action="store_true",
                    help="Use Min SNR noise adjustments")
     p.add_argument("--reinit_crossattn", action="store_true",
@@ -48,11 +49,11 @@ def parse_args():
                    help="Attempt to reset just qk weights for text realign")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
-    p.add_argument("--sample_prompt", nargs="+", type=str, help="prompt to use for a checkpoint sample image")
-    p.add_argument("--scheduler", type=str, default="constant", help="default=constant")
+    p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
+    p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--seed",        type=int, default=90)
-    p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="default=.txt_t5cache")
-    p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="default=.img_sdvae")
+    p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="Default=.txt_t5cache")
+    p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
 
     return p.parse_args()
 
@@ -62,9 +63,6 @@ args = parse_args()
 
 # --------------------------------------------------------------------------- #
 
-# This must be done before diffusers import
-# except... it doesnt actually work anyway?
-os.environ["TRANSFORMERS_NO_PROGRESS_BAR"] = "1"
 import os, math, shutil
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -140,7 +138,6 @@ def main():
     peak_lr       = args.learning_rate
     warmup_steps  = args.warmup_steps
     total_steps   = args.max_steps
-    optimizer_steps = total_steps / args.gradient_accum
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
@@ -266,7 +263,11 @@ def main():
     print("Using optimizer",args.optimizer,"weight decay:",weight_decay)
     if args.use_snr:
         print(f"  Using MinSNR with gamma of {args.noise_gamma}")
-    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, batch={args.batch_size}, steps={total_steps}({optimizer_steps})")
+    bs = args.batch_size ; accum = args.gradient_accum
+    effective_batch_size = bs * accum
+    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={total_steps}")
+    print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
+
     for p in unet.parameters(): p.requires_grad_(True)
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
     unet.train()
@@ -274,7 +275,7 @@ def main():
     scheduler_args = {
         "optimizer": optim,
         "num_warmup_steps": warmup_steps,
-        "num_training_steps": optimizer_steps,
+        "num_training_steps": total_steps,
     }
 
     if args.scheduler == "cosine_with_min_lr":
@@ -289,15 +290,19 @@ def main():
         "parameters will be updated"
     )
 
-    global_step    = 0
-    if args.gradient_accum >1:
-        accum_loss = 0
+    global_step = 0 
+    batch_count = 0
+    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0
 
     run_name = os.path.basename(args.output_dir)
     tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
 
     def checkpointandsave():
-        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{global_step:05}")
+        if global_step % args.gradient_accum != 0:
+            print("INTERNAL ERROR: checkpointandsave() not called on clean step")
+            return
+
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{batch_count:05}")
         pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
         pipe.unet = accelerator.unwrap_model(unet)
         print(f"Saving checkpoint to {ckpt_dir}")
@@ -312,22 +317,29 @@ def main():
                     shutil.copy(args.copy_config, args.output_dir)
 
     # ----- training loop --------------------------------------------------- #
+    """ Old way
     ebar = tqdm(range(math.ceil(args.max_steps / len(dl))), 
                 desc="Epoch", unit="", dynamic_ncols=True,
                 position=0,
                 leave=True)
-    for epoch in ebar:
+    """
+    steps_per_epoch = len(dl) // accum # dl count already divided by mini batch
+
+    total_epochs = math.ceil(args.max_steps / steps_per_epoch)
+
+    for epoch in range(total_epochs):
         if args.save_on_epoch:
             checkpointandsave()
 
-        pbar = tqdm(dl, 
-                    desc="LocalStep", 
-                    bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt}{rate_fmt}{postfix}", 
+        pbar = tqdm(range(steps_per_epoch),
+                    desc=f"E{epoch}/{total_epochs}", 
+                    bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}", 
                     dynamic_ncols=True,
-                    position=1,
                     leave=True)
 
-        for batch in pbar:
+        epoch_step =  0
+        # "batch" is actually micro-batch
+        for batch in dl:
             with accelerator.accumulate(unet):
                 # --- Load latents & prompt embeddings from cache ---
                 latents = []
@@ -397,23 +409,22 @@ def main():
                 pbar.set_postfix({"l": f"{loss.item():.3f}",
                                   "raw": f"{raw_mse_loss.item():.3f}",
                                   "qk": f"{qk_grad_sum:.1e}",
-                                  "g": f"{total_norm:.1e}",
-                                  "E": f"{epoch}",
+                                  "gr": f"{total_norm:.1e}",
                                   #"lr": f"{current_lr:.1e}",
                                   })
 
                 if tb_writer is not None:
-                    tb_writer.add_scalar("train/loss", loss.item(), global_step)
-                    tb_writer.add_scalar("train/loss_raw", raw_mse_loss.item(), global_step)
-                    tb_writer.add_scalar("train/learning_rate", current_lr, global_step)
-                    tb_writer.add_scalar("train/qk_grads_av", qk_grad_sum, global_step)
-                    if args.gradient_accum >1:
-                        accum_loss += loss.item()
-                        if global_step % args.gradient_accum == 0:
-                            tb_writer.add_scalar("train/loss_batch", 
-                                                 accum_loss / args.gradient_accum, 
-                                                 global_step)
-                            accum_loss=0
+                    # overly complicated if gr accum==1, but nice to skip an "if"
+                    accum_loss += loss.item()
+                    accum_mse += raw_mse_loss.item()
+                    accum_qk += qk_grad_sum
+                    if global_step % args.gradient_accum == 0:
+                        tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
+                        tb_writer.add_scalar("train/loss", accum_loss / args.gradient_accum, batch_count)
+                        tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
+                        tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
+                        accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0
+                        tb_writer.add_scalar("train/epoch_progress", epoch_step / steps_per_epoch,  batch_count)
 
             if (
                     accelerator.is_main_process
@@ -431,6 +442,9 @@ def main():
             # This is one reason it has to default to "1", not "0"
             if global_step % args.gradient_accum == 0:
                 optim.step(); lr_sched.step(); optim.zero_grad()
+                pbar.update(1)
+                batch_count += 1
+                epoch_step += 1
 
                 trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
                 if os.path.exists(trigger_path):
@@ -446,11 +460,12 @@ def main():
                         print("warning: got exception", e)
 
 
-            if global_step >= args.max_steps:
+            if batch_count >= args.max_steps:
                 break
 
+        # ----- end of "for batch in pbar" loop ------
         pbar.close()
-        if global_step >= args.max_steps:
+        if batch_count >= args.max_steps:
             break
 
     if accelerator.is_main_process:
