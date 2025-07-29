@@ -47,6 +47,8 @@ def parse_args():
                    help="Attempt to reset ALL attention weights for text realign")
     p.add_argument("--reinit_qk", action="store_true",
                    help="Attempt to reset just qk weights for text realign")
+    p.add_argument("--reinit_time", action="store_true",
+                   help="Attempt to reset just noise schedule layer")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
@@ -71,11 +73,19 @@ import torch
 import safetensors.torch as st
 from torch.utils.data import Dataset, DataLoader
 
+# --------------------------------------------------------------------------- #
+print("HAND HACKING FLOWMATCH MODULE")
+from diffusers import FlowMatchEulerDiscreteScheduler
+def scale_model_input(self, sample, timestep):
+    return sample
 
+FlowMatchEulerDiscreteScheduler.scale_model_input = scale_model_input
+# --------------------------------------------------------------------------- #
+    
 
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from diffusers import DiffusionPipeline, UNet2DConditionModel
-from diffusers import DDPMScheduler
+from diffusers import DDPMScheduler, PNDMScheduler
 from diffusers.models.attention import Attention as CrossAttention
 from diffusers.training_utils import compute_snr
 
@@ -187,6 +197,10 @@ def main():
         print("Attempting to reset Cross Attn layers of Unet")
         from reinit import reinit_cross_attention
         reinit_cross_attention(pipe.unet)
+    elif args.reinit_time:
+        print("Attempting to reset noise/time layers of Unet")
+        from reinit import reinit_time_and_out
+        reinit_time_and_out(pipe.unet)
     elif args.reinit_attn:
         print("Attempting to reset Attn layers of Unet")
         from reinit import reinit_all_attention
@@ -208,13 +222,16 @@ def main():
         pipe.vae.config.scaling_factor = args.vae_scaling_factor
 
     vae, unet = pipe.vae.eval(), pipe.unet
-    print("Overriding noise sched to DDPM")
-    noise_sched = DDPMScheduler(
-            num_train_timesteps=1000, # DIFFERENT from lr_sched num_training_steps
-            # beta_schedule="cosine", # "cosine not implemented for DDPMScheduler"
-            clip_sample=False
-            )
 
+    noise_sched = pipe.scheduler
+    print("Pipe wants to use noise scheduler", type(noise_sched))
+    if isinstance(noise_sched, PNDMScheduler):
+        print("Overriding noise scheduler from PNDMScheduler to DDPMScheduler")
+        noise_sched = DDPMScheduler(
+                num_train_timesteps=1000, # DIFFERENT from lr_sched num_training_steps
+                # beta_schedule="cosine", # "cosine not implemented for DDPMScheduler"
+                clip_sample=False
+                )
 
     latent_scaling = vae.config.scaling_factor
     print("VAE scaling factor is",latent_scaling)
@@ -262,7 +279,12 @@ def main():
     # -- optimizer settings...
     print("Using optimizer",args.optimizer,"weight decay:",weight_decay)
     if args.use_snr:
-        print(f"  Using MinSNR with gamma of {args.noise_gamma}")
+        if hasattr(noise_sched, "alphas_cumprod"):
+            print(f"  Using MinSNR with gamma of {args.noise_gamma}")
+        else:
+            print("  Skipping --use_snr: invalid with scheduler", type(noise_sched))
+            args.use_snr = False
+
     bs = args.batch_size ; accum = args.gradient_accum
     effective_batch_size = bs * accum
     print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={total_steps}")
@@ -360,20 +382,32 @@ def main():
                 prompt_emb = torch.stack(embeds).to(device, dtype=torch_dtype)
 
                 # --- Add noise ---
-                noise = torch.randn_like(latents)
-                bsz   = latents.size(0)
-                timesteps = torch.randint(
-                    0, noise_sched.config.num_train_timesteps,
-                    (bsz,), device=device, dtype=torch.long
-                )
-                noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
+
+                if hasattr(noise_sched, "add_noise"):
+                    # Standard DDPM/PNDM-style
+                    noise = torch.randn_like(latents)
+                    bsz = latents.size(0)
+                    timesteps = torch.randint(
+                        0, noise_sched.config.num_train_timesteps,
+                        (bsz,), device=device, dtype=torch.long
+                    )
+                    noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
+                    noise_target = noise
+                else:
+                    # Flow Matching: continuous s in [0, 1]
+                    bsz = latents.size(0)
+                    timesteps = torch.rand(bsz, device=device)
+                    s = timesteps.view(-1, *([1] * (latents.dim() - 1)))
+                    noise = torch.randn_like(latents)
+                    noisy_latents = s * noise + (1 - s) * latents
+                    noise_target = noise - latents
 
                 # --- UNet forward & loss ---
                 model_pred = unet(noisy_latents, timesteps,
                                   encoder_hidden_states=prompt_emb).sample
 
                 mse = torch.nn.functional.mse_loss(
-                        model_pred.float(), noise.float(), reduction="none")
+                        model_pred.float(), noise_target.float(), reduction="none")
                 mse = mse.view(mse.size(0), -1).mean(dim=1)
                 raw_mse_loss = mse.mean()
 

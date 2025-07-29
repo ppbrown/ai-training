@@ -196,3 +196,19 @@ def reinit_all_unet(unet):
             nn.init.zeros_(m.bias)
     print("[reinit_all_unet] All weights reinitialized.")
 
+# For trying to train on FlowMatch
+def reinit_time_and_out(unet):
+    # Reset time embedding
+    if hasattr(unet, 'time_embedding'):
+        for m in unet.time_embedding.modules():
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+    elif hasattr(unet, 'time_proj'):
+        for m in unet.time_proj.modules():
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+    # Reset final conv layer
+    if hasattr(unet, 'conv_out'):
+        unet.conv_out.reset_parameters()
+    elif hasattr(unet, 'out'):
+        unet.out.reset_parameters()
