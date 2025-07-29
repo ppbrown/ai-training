@@ -42,6 +42,21 @@ if [[ "$GAMMA" != "" ]] ; then
 	OUTPUTDIR="$OUTPUTDIR"g${GAMMA}
 fi
 
+if [[ "$1" != "" ]] ; then
+	case "$1" in
+		"checkpoint")
+			echo Creating dynamic checkpoint
+			touch $OUTPUTDIR/trigger.checkpoint
+			;;
+		*)
+			echo Unrecognized arg $1
+			echo "Known args:  checkpoint"
+			exit 1
+			;;
+	esac
+	exit
+fi
+
 # Note that this training script uses cached latents.
 # Resolution is set in the img latent caches
 accelerate launch train_from_cached.py \
