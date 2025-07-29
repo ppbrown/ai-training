@@ -45,7 +45,7 @@ fi
 if [[ "$1" != "" ]] ; then
 	case "$1" in
 		"checkpoint")
-			echo Creating dynamic checkpoint
+			echo Queuing dynamic checkpoint for $OUTPUTDIR
 			touch $OUTPUTDIR/trigger.checkpoint
 			;;
 		*)
