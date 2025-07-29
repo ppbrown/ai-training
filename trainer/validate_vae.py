@@ -5,6 +5,7 @@
 # It will display the result, so you can judge the quality of the VAE.
 
 
+import os
 import argparse
 from pathlib import Path
 import torch
@@ -49,6 +50,7 @@ with torch.no_grad():
     st.save_file({"latent": encoded}, "tempfile")
 
     cached = st.load_file("tempfile")["latent"].to(device)
+    os.remove("tempfile")
     decoded_image = vae_model.decode(cached).sample
 
 decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)  # Undo normalization
