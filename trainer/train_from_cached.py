@@ -20,6 +20,7 @@ def parse_args():
     p.add_argument('--gradient_checkpointing', action='store_true',
                    help="Enable grad checkpointing in unet")
     p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
+    p.add_argument("--epsilon",   type=float, default=1e-7, help="Default=1e-7")
     p.add_argument("--min_learning_rate",   type=float, default=0.1, help="Only used if 'min_lr' type schedulers are used")
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision bf16")
@@ -30,11 +31,10 @@ def parse_args():
     p.add_argument("--text_scaling_factor", type=float, help="Override embedding scaling factor")
     p.add_argument("--learning_rate_decay", type=float,
                    help="Subtract this every epoch, if schedler==constant")
-    p.add_argument("--max_steps",       type=int, default=10_000, 
-                   help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000")
-    ex_group = p.add_mutually_exclusive_group()
-    ex_group.add_argument("--save_steps",    type=int, help="Measured in effective batchsize(b * a)")
-    ex_group.add_argument("--save_on_epoch", action="store_true")
+    p.add_argument("--max_steps",       default=10_000, 
+                   help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
+    p.add_argument("--save_steps",    type=int, help="Measured in effective batchsize(b * a)")
+    p.add_argument("--save_on_epoch", action="store_true")
     p.add_argument("--warmup_steps",    type=int, default=0, help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--noise_gamma",     type=float, default=5.0)
     p.add_argument("--cpu_offload", action="store_true",
@@ -49,8 +49,16 @@ def parse_args():
                    help="Attempt to reset just qk weights for text realign")
     p.add_argument("--reinit_time", action="store_true",
                    help="Attempt to reset just noise schedule layer")
+    p.add_argument("--reinit_deeper_time", action="store_true",
+                   help="Attempt to reset noise schedule layer+ extra")
+    p.add_argument("--reinit_time_n", type=int,
+                   help="Deeper version of reinint_deeper_time. Allow for 'n' up layers to be trained")
+    p.add_argument("--unfreeze_time_n", type=int,
+                   help="Just unfreeze, dont reinit. Allow for 'n' up layers to be trained")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
+    p.add_argument("--targetted_training", action="store_true",
+                   help="Only train reset layers")
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
     p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--seed",        type=int, default=90)
@@ -103,7 +111,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 
 
 # --------------------------------------------------------------------------- #
-# 2. Dataset                                                                  #
+# 2. Utils                                                                    #
 # --------------------------------------------------------------------------- #
 
 from caption_dataset import CaptionImgDataset
@@ -139,6 +147,20 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
         print(f"Saved {outname}")
 
 
+
+def log_unet_l2_norm(unet, tb_writer, step):
+    """
+    Util to log the overall average parameter size.
+    Purpose is to determine if we maybe need weight decay or not.
+    (If it grows significantly over time, we prob need it)
+    """
+    # Gather all parameters as a single vector
+    params = [p.data.flatten() for p in unet.parameters() if p.requires_grad]
+    all_params = torch.cat(params)
+    l2_norm = torch.norm(all_params, p=2).item()
+    tb_writer.add_scalar('unet/L2_norm', l2_norm, step)
+
+
 #####################################################
 # Main                                              #
 #####################################################
@@ -147,7 +169,6 @@ def main():
     torch.manual_seed(args.seed)
     peak_lr       = args.learning_rate
     warmup_steps  = args.warmup_steps
-    total_steps   = args.max_steps
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
@@ -167,12 +188,23 @@ def main():
         custom_pipeline=None
 
     print(f"Loading '{args.pretrained_model}' Custom pipeline? {custom_pipeline}")
+    try:
+        pipe = DiffusionPipeline.from_pretrained(
+            args.pretrained_model,
+            custom_pipeline=custom_pipeline,
+            torch_dtype=torch_dtype
+        )
+    except Exception as e:
+        print("Error loading model", args.pretrained_model)
+        print(e)
+        exit(0)
 
-    pipe = DiffusionPipeline.from_pretrained(
-        args.pretrained_model,
-        custom_pipeline=custom_pipeline,
-        torch_dtype=torch_dtype
-    )
+    # -- unet trainable selection -- #
+    if args.targetted_training:
+        print("Limiting training to targetted area")
+        pipe.unet.requires_grad_(False)
+    else:
+        pipe.unet.requires_grad_(True)
 
     if args.reinit_unet:
         print("Training Unet from scratch")
@@ -201,12 +233,26 @@ def main():
         print("Attempting to reset noise/time layers of Unet")
         from reinit import reinit_time_and_out
         reinit_time_and_out(pipe.unet)
+    elif args.reinit_deeper_time:
+        print("Attempting to reset noise/time layers of Unet")
+        from reinit import reinit_deeper_time
+        reinit_deeper_time(pipe.unet)
+    elif args.reinit_time_n:
+        print(f"Attempting to reset (({args.reinit_time_n})) noise/time layers of Unet")
+        from reinit import unfreeze_up_mid_blocks
+        unfreeze_up_mid_blocks(pipe.unet, args.reinit_time_n, reset=True)
+    elif args.unfreeze_time_n:
+        print(f"Attempting to unfreeze (({args.reinit_time_n})) noise/time layers of Unet")
+        from reinit import unfreeze_up_mid_blocks
+        unfreeze_up_mid_blocks(pipe.unet, args.unfreeze_time_n)
     elif args.reinit_attn:
         print("Attempting to reset Attn layers of Unet")
         from reinit import reinit_all_attention
         reinit_all_attention(pipe.unet)
     else:
         print("Finetuning prior Unet")
+
+    # ------------------------------------------ #
 
     if args.cpu_offload:
         print("Enabling cpu offload")
@@ -244,7 +290,9 @@ def main():
         print("T5 (projection layer) scaling factor is", pipe.t5_projection.config.scaling_factor)
         for p in pipe.t5_projection.parameters(): p.requires_grad_(False)
 
-    # ----- data ------------------------------------------------------------ #
+
+
+    # ----- load data ------------------------------------------------------------ #
     ds = CaptionImgDataset(args.train_data_dir, 
                            txtcache_suffix=args.txtcache_suffix,
                            imgcache_suffix=args.imgcache_suffix,
@@ -257,13 +305,25 @@ def main():
                     pin_memory=True, collate_fn=collate_fn,
                     prefetch_factor=4)
 
+    bs = args.batch_size ; accum = args.gradient_accum
+    effective_batch_size = bs * accum
+    steps_per_epoch = len(dl) // accum # dl count already divided by mini batch
+    if args.max_steps and args.max_steps.endswith("e"):
+        max_steps = int(args.max_steps.removesuffix("e"))
+        max_steps = max_steps * steps_per_epoch
+    else:
+        max_steps = int(args.max_steps)
+
     # Gather just-trainable parameters
     trainable_params = [p for p in unet.parameters() if p.requires_grad]
     if args.optimizer == "lion":
         import lion_pytorch
+        if args.weight_decay:
+            weight_decay=args.weight_decay
+        else:
         # lion doesnt use decay?
-        weight_decay=0.00
-        optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=0.00, betas=(0.95,0.98))
+            weight_decay=0.00
+        optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=weight_decay, betas=(0.95,0.98))
         #optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=0.00, betas=(0.93,0.95))
     elif args.optimizer == "adamw8":
         import bitsandbytes as bnb
@@ -285,19 +345,17 @@ def main():
             print("  Skipping --use_snr: invalid with scheduler", type(noise_sched))
             args.use_snr = False
 
-    bs = args.batch_size ; accum = args.gradient_accum
-    effective_batch_size = bs * accum
-    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={total_steps}")
+    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(Esteps={steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
 
-    for p in unet.parameters(): p.requires_grad_(True)
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
-    unet.train()
+    if not args.targetted_training:
+        unet.train()
 
     scheduler_args = {
         "optimizer": optim,
         "num_warmup_steps": warmup_steps,
-        "num_training_steps": total_steps,
+        "num_training_steps": max_steps,
     }
 
     if args.scheduler == "cosine_with_min_lr":
@@ -314,7 +372,7 @@ def main():
 
     global_step = 0 
     batch_count = 0
-    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0
+    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
 
     run_name = os.path.basename(args.output_dir)
     tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
@@ -327,6 +385,8 @@ def main():
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{batch_count:05}")
         pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
         pipe.unet = accelerator.unwrap_model(unet)
+        log_unet_l2_norm(pipe.unet, tb_writer, batch_count)
+
         print(f"Saving checkpoint to {ckpt_dir}")
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
         pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
@@ -340,14 +400,13 @@ def main():
 
     # ----- training loop --------------------------------------------------- #
     """ Old way
-    ebar = tqdm(range(math.ceil(args.max_steps / len(dl))), 
+    ebar = tqdm(range(math.ceil(max_steps / len(dl))), 
                 desc="Epoch", unit="", dynamic_ncols=True,
                 position=0,
                 leave=True)
     """
-    steps_per_epoch = len(dl) // accum # dl count already divided by mini batch
 
-    total_epochs = math.ceil(args.max_steps / steps_per_epoch)
+    total_epochs = math.ceil(max_steps / steps_per_epoch)
 
     for epoch in range(total_epochs):
         if args.save_on_epoch:
@@ -396,9 +455,10 @@ def main():
                 else:
                     # Flow Matching: continuous s in [0, 1]
                     bsz = latents.size(0)
-                    timesteps = torch.rand(bsz, device=device)
-                    s = timesteps.view(-1, *([1] * (latents.dim() - 1)))
+                    eps = args.epsilon  # avoid divide-by-zero magic
                     noise = torch.randn_like(latents)
+                    timesteps = torch.rand(bsz, device=device) * (1 - eps) + eps
+                    s = timesteps.view(-1, *([1] * (latents.dim() - 1)))  # For broadcasting
                     noisy_latents = s * noise + (1 - s) * latents
                     noise_target = noise - latents
 
@@ -452,23 +512,16 @@ def main():
                     accum_loss += loss.item()
                     accum_mse += raw_mse_loss.item()
                     accum_qk += qk_grad_sum
+                    accum_norm += total_norm
                     if global_step % args.gradient_accum == 0:
                         tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
                         if args.use_snr:
                             tb_writer.add_scalar("train/loss_snr", accum_loss / args.gradient_accum, batch_count)
                         tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
                         tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
-                        accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0
+                        tb_writer.add_scalar("train/grad_norm", accum_norm / args.gradient_accum, batch_count)
+                        accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
                         tb_writer.add_scalar("train/epoch_progress", epoch_step / steps_per_epoch,  batch_count)
-
-            if (
-                    accelerator.is_main_process
-                    and args.save_steps
-                    #and global_step
-                    and global_step % args.save_steps == 0
-            ):
-                checkpointandsave()
-                # this will mess up the pbar if done here instead of end of epoch
 
             torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
 
@@ -494,13 +547,18 @@ def main():
                     except Exception as e:
                         print("warning: got exception", e)
 
+                elif batch_count % args.save_steps == 0:
+                    print(f"Saving every {args.save_steps} steps...")
+                    checkpointandsave()
 
-            if batch_count >= args.max_steps:
+
+
+            if batch_count >= max_steps:
                 break
 
         # ----- end of "for batch in pbar" loop ------
         pbar.close()
-        if batch_count >= args.max_steps:
+        if batch_count >= max_steps:
             break
 
     if accelerator.is_main_process:
