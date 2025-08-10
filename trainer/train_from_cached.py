@@ -41,22 +41,28 @@ def parse_args():
                    help="Enable cpu offload at pipe level")
     p.add_argument("--use_snr", action="store_true",
                    help="Use Min SNR noise adjustments")
+
     p.add_argument("--reinit_crossattn", action="store_true",
                    help="Attempt to reset cross attention weights for text realign")
     p.add_argument("--reinit_attn", action="store_true",
                    help="Attempt to reset ALL attention weights for text realign")
     p.add_argument("--reinit_qk", action="store_true",
                    help="Attempt to reset just qk weights for text realign")
+    p.add_argument("--reinit_out", action="store_true",
+                   help="Attempt to reset just out blocks")
+    p.add_argument("--unfreeze_out", action="store_true",
+                   help="Just make the out blocks trainable")
     p.add_argument("--reinit_time", action="store_true",
                    help="Attempt to reset just noise schedule layer")
-    p.add_argument("--reinit_deeper_time", action="store_true",
-                   help="Attempt to reset noise schedule layer+ extra")
-    p.add_argument("--reinit_time_n", type=int,
-                   help="Deeper version of reinint_deeper_time. Allow for 'n' up layers to be trained")
-    p.add_argument("--unfreeze_time_n", type=int,
+    p.add_argument("--unfreeze_time", action="store_true",
+                   help="Attempt to unfreeze just noise schedule layer")
+    p.add_argument("--unfreeze_up_blocks", type=int,
                    help="Just unfreeze, dont reinit. Allow for 'n' up layers to be trained")
+    p.add_argument("--unfreeze_mid_block", action="store_true",
+                   help="Just unfreeze, dont reinit.")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
+
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
@@ -201,9 +207,10 @@ def main():
 
     # -- unet trainable selection -- #
     if args.targetted_training:
-        print("Limiting training to targetted area")
+        print("Limiting Unet training to targetted area(s)")
         pipe.unet.requires_grad_(False)
     else:
+        print("Training full prior Unet")
         pipe.unet.requires_grad_(True)
 
     if args.reinit_unet:
@@ -229,28 +236,36 @@ def main():
         print("Attempting to reset Cross Attn layers of Unet")
         from reinit import reinit_cross_attention
         reinit_cross_attention(pipe.unet)
-    elif args.reinit_time:
-        print("Attempting to reset noise/time layers of Unet")
-        from reinit import reinit_time_and_out
-        reinit_time_and_out(pipe.unet)
-    elif args.reinit_deeper_time:
-        print("Attempting to reset noise/time layers of Unet")
-        from reinit import reinit_deeper_time
-        reinit_deeper_time(pipe.unet)
-    elif args.reinit_time_n:
-        print(f"Attempting to reset (({args.reinit_time_n})) noise/time layers of Unet")
-        from reinit import unfreeze_up_mid_blocks
-        unfreeze_up_mid_blocks(pipe.unet, args.reinit_time_n, reset=True)
-    elif args.unfreeze_time_n:
-        print(f"Attempting to unfreeze (({args.reinit_time_n})) noise/time layers of Unet")
-        from reinit import unfreeze_up_mid_blocks
-        unfreeze_up_mid_blocks(pipe.unet, args.unfreeze_time_n)
     elif args.reinit_attn:
         print("Attempting to reset Attn layers of Unet")
         from reinit import reinit_all_attention
         reinit_all_attention(pipe.unet)
-    else:
-        print("Finetuning prior Unet")
+
+    if args.reinit_out:
+        print("Attempting to reset Out layers of Unet")
+        from reinit import retrain_out
+        retrain_out(pipe.unet, reset=True)
+    elif args.unfreeze_out:
+        print("Attempting to unfreeze Out layers of Unet")
+        from reinit import retrain_out
+        retrain_out(pipe.unet, reset=False)
+    if args.reinit_time:
+        print("Attempting to reset all time layers of Unet")
+        from reinit import retrain_time
+        retrain_time(pipe.unet, reset=True)
+    elif args.unfreeze_time:
+        print("Attempting to unfreeze all time layers of Unet")
+        from reinit import retrain_time
+        retrain_time(pipe.unet, reset=False)
+
+    if args.unfreeze_up_blocks:
+        print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) upblocks of Unet")
+        from reinit import unfreeze_up_blocks
+        unfreeze_up_blocks(pipe.unet, args.unfreeze_up_blocks, reset=False)
+    if args.unfreeze_mid_block:
+        print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) mid block of Unet")
+        from reinit import unfreeze_mid_block
+        unfreeze_mid_block(pipe.unet)
 
     # ------------------------------------------ #
 
@@ -278,6 +293,11 @@ def main():
                 # beta_schedule="cosine", # "cosine not implemented for DDPMScheduler"
                 clip_sample=False
                 )
+
+    if hasattr(noise_sched, "add_noise"):
+        print("DEBUG: add_noise present")
+    else:
+        print("DEBUG: add_noise not present: presuming FlowMatch desired")
 
     latent_scaling = vae.config.scaling_factor
     print("VAE scaling factor is",latent_scaling)
@@ -349,8 +369,7 @@ def main():
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
 
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
-    if not args.targetted_training:
-        unet.train()
+    unet.train()
 
     scheduler_args = {
         "optimizer": optim,
@@ -435,7 +454,12 @@ def main():
                         arr = h5f["emb"][:]
                         emb = torch.from_numpy(arr)
                     else:
-                        emb = st.load_file(cache_file)["emb"]
+                        try:
+                            emb = st.load_file(cache_file)["emb"]
+                        except Exception as e:
+                            print("Error loading these files...")
+                            print(cache_file)
+                            exit(0)
                     emb = emb.to(device, dtype=torch_dtype)
                     embeds.append(emb)
                 prompt_emb = torch.stack(embeds).to(device, dtype=torch_dtype)
@@ -523,7 +547,9 @@ def main():
                         accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
                         tb_writer.add_scalar("train/epoch_progress", epoch_step / steps_per_epoch,  batch_count)
 
-            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            # Accelerate will make sure this only gets called on full-batch boundaries
+            if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(unet.parameters(), 1.0)
 
             global_step += 1
             # We have to take into account gradient accumilation!!
