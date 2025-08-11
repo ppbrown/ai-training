@@ -56,8 +56,8 @@ def parse_args():
                    help="Attempt to reset just noise schedule layer")
     p.add_argument("--unfreeze_time", action="store_true",
                    help="Attempt to unfreeze just noise schedule layer")
-    p.add_argument("--unfreeze_up_blocks", type=int,
-                   help="Just unfreeze, dont reinit. Allow for 'n' up layers to be trained")
+    p.add_argument("--unfreeze_up_blocks", type=int, nargs="+",
+                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
     p.add_argument("--unfreeze_mid_block", action="store_true",
                    help="Just unfreeze, dont reinit.")
     p.add_argument("--reinit_unet", action="store_true",
@@ -250,11 +250,11 @@ def main():
         from reinit import retrain_out
         retrain_out(pipe.unet, reset=False)
     if args.reinit_time:
-        print("Attempting to reset all time layers of Unet")
+        print("Attempting to reset time layers of Unet")
         from reinit import retrain_time
         retrain_time(pipe.unet, reset=True)
     elif args.unfreeze_time:
-        print("Attempting to unfreeze all time layers of Unet")
+        print("Attempting to unfreeze time layers of Unet")
         from reinit import retrain_time
         retrain_time(pipe.unet, reset=False)
 
@@ -263,7 +263,7 @@ def main():
         from reinit import unfreeze_up_blocks
         unfreeze_up_blocks(pipe.unet, args.unfreeze_up_blocks, reset=False)
     if args.unfreeze_mid_block:
-        print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) mid block of Unet")
+        print(f"Attempting to unfreeze mid block of Unet")
         from reinit import unfreeze_mid_block
         unfreeze_mid_block(pipe.unet)
 
@@ -477,12 +477,16 @@ def main():
                     noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
                     noise_target = noise
                 else:
-                    # Flow Matching: continuous s in [0, 1]
+                    # Flow Matching: continuous s in [epsilon, 1 - epsilon]
                     bsz = latents.size(0)
                     eps = args.epsilon  # avoid divide-by-zero magic
                     noise = torch.randn_like(latents)
-                    timesteps = torch.rand(bsz, device=device) * (1 - eps) + eps
-                    s = timesteps.view(-1, *([1] * (latents.dim() - 1)))  # For broadcasting
+                    
+                    s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
+                    timesteps = s.to(torch.float32).mul(999.0)
+
+                    s = s.view(-1, *([1] * (latents.dim() - 1)))  # broadcasting [B,1,1,1]
+
                     noisy_latents = s * noise + (1 - s) * latents
                     noise_target = noise - latents
 
