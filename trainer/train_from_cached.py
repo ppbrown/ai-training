@@ -58,6 +58,8 @@ def parse_args():
                    help="Attempt to unfreeze just noise schedule layer")
     p.add_argument("--unfreeze_up_blocks", type=int, nargs="+",
                    help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
+    p.add_argument("--unfreeze_down_blocks", type=int, nargs="+",
+                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
     p.add_argument("--unfreeze_mid_block", action="store_true",
                    help="Just unfreeze, dont reinit.")
     p.add_argument("--reinit_unet", action="store_true",
@@ -262,6 +264,10 @@ def main():
         print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) upblocks of Unet")
         from reinit import unfreeze_up_blocks
         unfreeze_up_blocks(pipe.unet, args.unfreeze_up_blocks, reset=False)
+    if args.unfreeze_down_blocks:
+        print(f"Attempting to unfreeze (({args.unfreeze_down_blocks})) upblocks of Unet")
+        from reinit import unfreeze_down_blocks
+        unfreeze_down_blocks(pipe.unet, args.unfreeze_down_blocks, reset=False)
     if args.unfreeze_mid_block:
         print(f"Attempting to unfreeze mid block of Unet")
         from reinit import unfreeze_mid_block
@@ -365,7 +371,7 @@ def main():
             print("  Skipping --use_snr: invalid with scheduler", type(noise_sched))
             args.use_snr = False
 
-    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(Esteps={steps_per_epoch})")
+    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
 
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
