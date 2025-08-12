@@ -15,6 +15,12 @@ from torch import nn
 import torch.nn.init as init
 from diffusers.models.attention import Attention as CrossAttention
 
+
+# Internal util
+def make_trainable(module):
+    for param in module.parameters():
+        param.requires_grad = True
+
 def _xavier(m: nn.Linear) -> None:
     nn.init.xavier_uniform_(m.weight)
     if m.bias is not None:
@@ -124,6 +130,7 @@ def reinit_all_attention(
         if hasattr(mod, "is_cross_attention"):
             # Decide if this attention should be reset
             if (mod.is_cross_attention and cross) or (not mod.is_cross_attention and self_attn):
+                make_trainable(mod)
                 # q, k, v
                 for proj_name in ("to_q", "to_k", "to_v"):
                     proj = getattr(mod, proj_name, None)
@@ -178,6 +185,7 @@ def reinit_outer_unet(unet):
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
             print(f"Reinitialized {name}")
+            make_trainable(module)
 
 # randomize ALL unet weights not just qk
 def reinit_all_unet(unet):
@@ -194,21 +202,89 @@ def reinit_all_unet(unet):
         elif isinstance(m, (nn.GroupNorm, nn.InstanceNorm2d)):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
+        make_trainable(m)
     print("[reinit_all_unet] All weights reinitialized.")
 
-# For trying to train on FlowMatch
-def reinit_time_and_out(unet):
-    # Reset time embedding
+#---------------------------------------------------
+# sections below are for trying to train on FlowMatch
+# (maybe could be used for other things in future)
+def retrain_time(unet, reset=True):
+    """Reset & unfreeze time embedding head. If reset=False, just unfreeze."""
+
     if hasattr(unet, 'time_embedding'):
         for m in unet.time_embedding.modules():
-            if hasattr(m, 'reset_parameters'):
+            if hasattr(m, 'reset_parameters') and reset:
                 m.reset_parameters()
+        make_trainable(unet.time_embedding)
     elif hasattr(unet, 'time_proj'):
         for m in unet.time_proj.modules():
-            if hasattr(m, 'reset_parameters'):
+            if hasattr(m, 'reset_parameters') and reset:
                 m.reset_parameters()
+        make_trainable(unet.time_proj)
+
+def retrain_out(unet, reset=True):
+    """Reset & unfreeze out head. If reset=False, just unfreeze."""
     # Reset final conv layer
     if hasattr(unet, 'conv_out'):
-        unet.conv_out.reset_parameters()
+        if reset:
+            unet.conv_out.reset_parameters()
+        make_trainable(unet.conv_out)
     elif hasattr(unet, 'out'):
-        unet.out.reset_parameters()
+        if reset:
+            unet.out.reset_parameters()
+        make_trainable(unet.out)
+
+# train upblock(s)
+def unfreeze_up_blocks(unet, blocknum: list[int], reset=False):
+    if hasattr(unet, 'up_blocks'):
+        for ndx in blocknum:
+            upblock = unet.up_blocks[ndx]
+            if reset:
+                for m in upblock.modules():
+                    if hasattr(m, 'reset_parameters'):
+                        m.reset_parameters()
+            make_trainable(upblock)
+
+def unfreeze_up_block(unet, n, reset=False):
+    if hasattr(unet, 'up_blocks'):
+        for upblock in unet.up_blocks[n]:
+            if reset:
+                for m in upblock.modules():
+                    if hasattr(m, 'reset_parameters'):
+                        m.reset_parameters()
+            make_trainable(upblock)
+
+def unfreeze_down_blocks(unet, blocknum: list[int], reset=False):
+    if hasattr(unet, 'down_blocks'):
+        for ndx in blocknum:
+            downblock = unet.up_blocks[ndx]
+            if reset:
+                for m in downblock.modules():
+                    if hasattr(m, 'reset_parameters'):
+                        m.reset_parameters()
+            make_trainable(downblock)
+
+def unfreeze_mid_block(unet):
+    if hasattr(unet, 'mid_block'):
+        make_trainable(unet.mid_block)
+
+# ----------------------------------------------------
+# Compat defs
+# Should probably just remove these
+def reinit_deeper_time(unet):
+    """
+    Unfreeze noise schedule related blocks.
+    This involves unfreezing last up/mid block.
+    """
+    retrain_time(unet, False)
+    retrain_out(unet, False)
+    unfreeze_up_mid_blocks(unet, 1)
+
+def unfreeze_up_mid_blocks(unet, n, reset=False):
+    """
+    Unfreezes the last n up_blocks and the mid_block in the UNet.
+    No longer unfreezes time embedding and out conv.
+    For SD1.5, max n == 4
+    """
+    unfreeze_up_blocks(unet, n, reset)
+    unfreeze_mid_block(unet)
