@@ -584,7 +584,7 @@ def main():
                         print("warning: got exception", e)
 
                 elif batch_count % args.save_steps == 0:
-                    print(f"Saving every {args.save_steps} steps...")
+                    print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
                     checkpointandsave()
 
 
@@ -601,7 +601,13 @@ def main():
         if tb_writer is not None:
             tb_writer.close()
         pipe.save_pretrained(args.output_dir, safe_serialization=True)
+        sample_img(args.sample_prompt, args.seed, args.output_dir, 
+                   custom_pipeline)
         print(f"finished:model saved to {args.output_dir}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Keyboard interrupt. Exiting.")
+        # just fall off end?
