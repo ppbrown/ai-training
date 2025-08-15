@@ -52,6 +52,10 @@ def parse_args():
                    help="Attempt to reset just out blocks")
     p.add_argument("--unfreeze_out", action="store_true",
                    help="Just make the out blocks trainable")
+    p.add_argument("--reinit_in", action="store_true",
+                   help="Attempt to reset just in blocks")
+    p.add_argument("--unfreeze_in", action="store_true",
+                   help="Just make the in blocks trainable")
     p.add_argument("--reinit_time", action="store_true",
                    help="Attempt to reset just noise schedule layer")
     p.add_argument("--unfreeze_time", action="store_true",
@@ -64,6 +68,9 @@ def parse_args():
                    help="Just unfreeze, dont reinit.")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
+
+    parser.add_argument( "--gradient_clip", type=float, default=1.0,
+                        help="Max global grad norm. Set <=0 to disable gradient clipping.")
 
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")
@@ -251,6 +258,14 @@ def main():
         print("Attempting to unfreeze Out layers of Unet")
         from reinit import retrain_out
         retrain_out(pipe.unet, reset=False)
+    if args.reinit_in:
+        print("Attempting to reset in layers of Unet")
+        from reinit import retrain_in
+        retrain_in(pipe.unet, reset=True)
+    elif args.unfreeze_in:
+        print("Attempting to unfreeze in layers of Unet")
+        from reinit import retrain_in
+        retrain_in(pipe.unet, reset=False)
     if args.reinit_time:
         print("Attempting to reset time layers of Unet")
         from reinit import retrain_time
@@ -558,8 +573,9 @@ def main():
                         tb_writer.add_scalar("train/epoch_progress", epoch_step / steps_per_epoch,  batch_count)
 
             # Accelerate will make sure this only gets called on full-batch boundaries
-            if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(unet.parameters(), 1.0)
+            if accelerator.sync_gradients and (args.gradient_clip is not None and args.gradient_clip > 0):
+                    accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
+
 
             global_step += 1
             # We have to take into account gradient accumilation!!
