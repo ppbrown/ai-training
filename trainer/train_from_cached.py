@@ -43,7 +43,8 @@ def parse_args():
     p.add_argument("--save_on_epoch", action="store_true")
     p.add_argument("--noise_gamma",     type=float, default=5.0)
     p.add_argument("--betas",  type=float, nargs=2, metavar=("BETA1","BETA2"),
-                   default=(0.95, 0.98), help="Default=0.95, 0.98")
+                   help="Typical LION default is '0.9, 0.99'." \
+                   "For instability issues,  use 0.95 0.98")
     p.add_argument("--use_snr", action="store_true",
                    help="Use Min SNR noise adjustments")
     p.add_argument( "--gradient_clip", type=float, default=1.0,
@@ -360,24 +361,25 @@ def main():
 
     # Gather just-trainable parameters
     trainable_params = [p for p in unet.parameters() if p.requires_grad]
+
+    # Common args that may or may not be defined
+    # Allow fall-back to optimizer-specific defaults
+    opt_args = {
+        **({'weight_decay': args.weight_decay} if args.weight_decay is not None else {}),
+        **({'betas': tuple(args.betas)} if args.betas else {}),
+    }
     if args.optimizer == "lion":
         import lion_pytorch
-        if args.weight_decay:
-            weight_decay=args.weight_decay
-        else:
-        # lion doesnt use decay?
-            weight_decay=0.00
-        optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=weight_decay, 
-                                  betas=tuple(args.betas))
-        #optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=0.00, betas=(0.93,0.95))
+        optim = lion_pytorch.Lion(trainable_params, 
+                                  lr=peak_lr, 
+                                  **opt_args
+                                  )
     elif args.optimizer == "adamw8":
         import bitsandbytes as bnb
-        if args.weight_decay:
-            weight_decay=args.weight_decay
-        else:
-            weight_decay=0.01
-        optim = bnb.optim.AdamW8bit(trainable_params, weight_decay=weight_decay, lr=peak_lr, 
-                                    betas=tuple(args.betas))
+        optim = bnb.optim.AdamW8bit(trainable_params, 
+                                    lr=peak_lr, 
+                                    **opt_args
+                                    )
     else:
         print("ERROR: unrecognized optimizer setting")
         exit(1)
