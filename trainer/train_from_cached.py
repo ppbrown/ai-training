@@ -10,9 +10,17 @@
 import argparse
 def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save")
+    p.add_argument("--fp32", action="store_true",
+                   help="Override default mixed precision bf16")
+    p.add_argument("--cpu_offload", action="store_true",
+                   help="Enable cpu offload at pipe level")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
+    p.add_argument("--is_custom", action="store_true",
+                   help="Model provides a 'custom pipeline'")
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
+    p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
+    p.add_argument("--epsilon",        type=float, default=1e-5, help="Default=1e-5")
     p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
     p.add_argument("--batch_size",     type=int, default=4)
@@ -20,30 +28,29 @@ def parse_args():
     p.add_argument('--gradient_checkpointing', action='store_true',
                    help="Enable grad checkpointing in unet")
     p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
-    p.add_argument("--epsilon",   type=float, default=1e-7, help="Default=1e-7")
-    p.add_argument("--min_learning_rate",   type=float, default=0.1, help="Only used if 'min_lr' type schedulers are used")
-    p.add_argument("--fp32", action="store_true",
-                   help="Override default mixed precision bf16")
-    p.add_argument("--is_custom", action="store_true",
-                   help="Model provides a 'custom pipeline'")
+    p.add_argument("--min_learning_rate",   type=float, default=0.1, 
+                   help="Only used if 'min_lr' type schedulers are used")
+    p.add_argument("--learning_rate_decay", type=float,
+                   help="Subtract this every epoch, if schedler==constant")
     p.add_argument("--weight_decay",   type=float)
     p.add_argument("--vae_scaling_factor", type=float, help="Override vae scaling factor")
     p.add_argument("--text_scaling_factor", type=float, help="Override embedding scaling factor")
-    p.add_argument("--learning_rate_decay", type=float,
-                   help="Subtract this every epoch, if schedler==constant")
+    p.add_argument("--warmup_steps",    type=int, default=0, 
+                   help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--max_steps",       default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
     p.add_argument("--save_steps",    type=int, help="Measured in effective batchsize(b * a)")
     p.add_argument("--save_on_epoch", action="store_true")
-    p.add_argument("--warmup_steps",    type=int, default=0, help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--noise_gamma",     type=float, default=5.0)
     p.add_argument("--betas",  type=float, nargs=2, metavar=("BETA1","BETA2"),
-                   default=(0.95, 0.98), help="Default=(0.95, 0.98)")
-    p.add_argument("--cpu_offload", action="store_true",
-                   help="Enable cpu offload at pipe level")
+                   default=(0.95, 0.98), help="Default=0.95, 0.98")
     p.add_argument("--use_snr", action="store_true",
                    help="Use Min SNR noise adjustments")
+    p.add_argument( "--gradient_clip", type=float, default=1.0,
+                        help="Max global grad norm. Set <=0 to disable gradient clipping.")
 
+    p.add_argument("--targetted_training", action="store_true",
+                   help="Only train reset layers")
     p.add_argument("--reinit_crossattn", action="store_true",
                    help="Attempt to reset cross attention weights for text realign")
     p.add_argument("--reinit_attn", action="store_true",
@@ -71,13 +78,7 @@ def parse_args():
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
 
-    p.add_argument( "--gradient_clip", type=float, default=1.0,
-                        help="Max global grad norm. Set <=0 to disable gradient clipping.")
-
-    p.add_argument("--targetted_training", action="store_true",
-                   help="Only train reset layers")
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
-    p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--seed",        type=int, default=90)
     p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="Default=.txt_t5cache")
     p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
