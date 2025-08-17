@@ -37,6 +37,8 @@ def parse_args():
     p.add_argument("--save_on_epoch", action="store_true")
     p.add_argument("--warmup_steps",    type=int, default=0, help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--noise_gamma",     type=float, default=5.0)
+    p.add_argument("--betas",  type=float, nargs=2, metavar=("BETA1","BETA2"),
+                   default=(0.95, 0.98), help="Default=(0.95, 0.98)")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
     p.add_argument("--use_snr", action="store_true",
@@ -69,7 +71,7 @@ def parse_args():
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
 
-    parser.add_argument( "--gradient_clip", type=float, default=1.0,
+    p.add_argument( "--gradient_clip", type=float, default=1.0,
                         help="Max global grad norm. Set <=0 to disable gradient clipping.")
 
     p.add_argument("--targetted_training", action="store_true",
@@ -364,7 +366,8 @@ def main():
         else:
         # lion doesnt use decay?
             weight_decay=0.00
-        optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=weight_decay, betas=(0.95,0.98))
+        optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=weight_decay, 
+                                  betas=tuple(args.betas))
         #optim = lion_pytorch.Lion(trainable_params, lr=peak_lr, weight_decay=0.00, betas=(0.93,0.95))
     elif args.optimizer == "adamw8":
         import bitsandbytes as bnb
@@ -372,7 +375,8 @@ def main():
             weight_decay=args.weight_decay
         else:
             weight_decay=0.01
-        optim = bnb.optim.AdamW8bit(trainable_params, weight_decay=weight_decay, lr=peak_lr, betas=(0.95,0.98))
+        optim = bnb.optim.AdamW8bit(trainable_params, weight_decay=weight_decay, lr=peak_lr, 
+                                    betas=tuple(args.betas))
     else:
         print("ERROR: unrecognized optimizer setting")
         exit(1)
@@ -599,7 +603,7 @@ def main():
                     except Exception as e:
                         print("warning: got exception", e)
 
-                elif batch_count % args.save_steps == 0:
+                elif args.save_steps and (batch_count % args.save_steps == 0):
                     print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
                     checkpointandsave()
 
