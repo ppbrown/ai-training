@@ -393,6 +393,7 @@ def main():
 
     print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
+    print(f"        betas={args.betas}, weight_decay={args.weight_decay}")
 
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
     unet.train()
