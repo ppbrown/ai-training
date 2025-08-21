@@ -222,6 +222,21 @@ def retrain_time(unet, reset=True):
                 m.reset_parameters()
         make_trainable(unet.time_proj)
 
+def retrain_in(unet, reset=True):
+    """Reset & unfreeze input head. If reset=False, just unfreeze."""
+    # Reset input conv layer
+    if hasattr(unet, 'conv_in'):
+        if reset:
+            unet.conv_in.reset_parameters()
+        make_trainable(unet.conv_in)
+    """ Special wierd case. Not worth making this work at the moment.
+        We dont need it
+    elif hasattr(unet, 'in'):
+        if reset:
+            unet.in.reset_parameters()
+        make_trainable(unet.in)
+        """
+
 def retrain_out(unet, reset=True):
     """Reset & unfreeze out head. If reset=False, just unfreeze."""
     # Reset final conv layer
@@ -229,6 +244,7 @@ def retrain_out(unet, reset=True):
         if reset:
             unet.conv_out.reset_parameters()
         make_trainable(unet.conv_out)
+    # This next bit is probably not needed
     elif hasattr(unet, 'out'):
         if reset:
             unet.out.reset_parameters()
