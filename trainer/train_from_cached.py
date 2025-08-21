@@ -11,7 +11,7 @@ import argparse
 def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save")
     p.add_argument("--fp32", action="store_true",
-                   help="Override default mixed precision bf16")
+                   help="Override default mixed precision fp32/bf16, to force everything full fp32")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
