@@ -20,7 +20,7 @@ def parse_args():
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
     p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
-    p.add_argument("--epsilon",        type=float, default=1e-5, help="Default=1e-5")
+    p.add_argument("--epsilon",        type=float, default=1e-5, help="Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
     p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
     p.add_argument("--batch_size",     type=int, default=4)
@@ -361,6 +361,9 @@ def main():
 
     # Gather just-trainable parameters
     trainable_params = [p for p in unet.parameters() if p.requires_grad]
+    if not trainable_params:
+        print("ERROR: no layers selected for training")
+        exit(0)
 
     # Common args that may or may not be defined
     # Allow fall-back to optimizer-specific defaults
@@ -385,7 +388,7 @@ def main():
         exit(1)
 
     # -- optimizer settings...
-    print("Using optimizer",args.optimizer,"weight decay:",weight_decay)
+    print("Using optimizer",args.optimizer)
     if args.use_snr:
         if hasattr(noise_sched, "alphas_cumprod"):
             print(f"  Using MinSNR with gamma of {args.noise_gamma}")
@@ -395,7 +398,11 @@ def main():
 
     print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
-    print(f"        betas={args.betas}, weight_decay={args.weight_decay}")
+    print("        betas=",
+          args.betas if args.betas else "(default)",
+          " weight_decay=",
+          args.weight_decay if args.weight_decay else "(default)",
+    )
 
     unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
     unet.train()
@@ -435,16 +442,21 @@ def main():
         pipe.unet = accelerator.unwrap_model(unet)
         log_unet_l2_norm(pipe.unet, tb_writer, batch_count)
 
+        if os.path.exists(ckpt_dir):
+            print(f"Checkpoint {ckpt_dir} already exists. Skipping redundant save")
+            return
+
         print(f"Saving checkpoint to {ckpt_dir}")
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
         pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
         if args.sample_prompt is not None:
             sample_img(args.sample_prompt, args.seed, ckpt_dir, 
                        custom_pipeline)
-            if global_step == 0:
-                if args.copy_config:
-                    tqdm.write(f"Archiving {args.copy_config}")
-                    shutil.copy(args.copy_config, args.output_dir)
+        if args.copy_config:
+            savefile = os.path.join(args.output_dir, args.copy_config)
+            if not os.path.exists(savefile):
+                tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
+                shutil.copy(args.copy_config, args.output_dir)
 
     # ----- training loop --------------------------------------------------- #
     """ Old way
@@ -624,10 +636,14 @@ def main():
     if accelerator.is_main_process:
         if tb_writer is not None:
             tb_writer.close()
-        pipe.save_pretrained(args.output_dir, safe_serialization=True)
-        sample_img(args.sample_prompt, args.seed, args.output_dir, 
-                   custom_pipeline)
-        print(f"finished:model saved to {args.output_dir}")
+        if old_code:
+            pipe.save_pretrained(args.output_dir, safe_serialization=True)
+            sample_img(args.sample_prompt, args.seed, args.output_dir, 
+                       custom_pipeline)
+            print(f"finished:model saved to {args.output_dir}")
+        else:
+            checkpointandsave()
+
 
 if __name__ == "__main__":
     try:
