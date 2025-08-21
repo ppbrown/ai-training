@@ -196,7 +196,7 @@ def main():
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
-        mixed_precision="bf16" if not args.fp32 else "no",
+        mixed_precision="no" if args.fp32 else "bf16",
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
