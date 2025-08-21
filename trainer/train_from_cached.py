@@ -189,15 +189,19 @@ def main():
     peak_lr       = args.learning_rate
     warmup_steps  = args.warmup_steps
 
+    print("Training type:", "fp32" if args.fp32 else "mixed precision")
+
+    model_dtype   = torch.float32 # Always load master in full fp32
+    compute_dtype = torch.float32 if args.fp32 else torch.bfloat16 # runtime math dtype
+
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
         mixed_precision="bf16" if not args.fp32 else "no",
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
-    torch_dtype=torch.bfloat16 if accelerator.mixed_precision=="bf16" else torch.float32
+    
 
-    print("Training type:",torch_dtype)
 
     # ----- load pipeline --------------------------------------------------- #
 
@@ -211,7 +215,7 @@ def main():
         pipe = DiffusionPipeline.from_pretrained(
             args.pretrained_model,
             custom_pipeline=custom_pipeline,
-            torch_dtype=torch_dtype
+            torch_dtype=model_dtype
         )
     except Exception as e:
         print("Error loading model", args.pretrained_model)
@@ -487,7 +491,7 @@ def main():
                 for cache_file in batch["img_cache"]:
                     latent = st.load_file(cache_file)["latent"]
                     latents.append(latent)
-                latents = torch.stack(latents).to(device, dtype=torch_dtype) * latent_scaling
+                latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
 
                 embeds = []
                 for cache_file in batch["txt_cache"]:
@@ -501,9 +505,9 @@ def main():
                             print("Error loading these files...")
                             print(cache_file)
                             exit(0)
-                    emb = emb.to(device, dtype=torch_dtype)
+                    emb = emb.to(device, dtype=compute_dtype)
                     embeds.append(emb)
-                prompt_emb = torch.stack(embeds).to(device, dtype=torch_dtype)
+                prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
 
                 # --- Add noise ---
 
