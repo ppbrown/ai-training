@@ -150,7 +150,7 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
         custom_pipeline=PIPELINE_CODE_DIR, 
         use_safetensors=True,
         safety_checker=None, requires_safety_checker=False,
-        torch_dtype=torch.bfloat16,
+        #torch_dtype=torch.bfloat16,
     )
     pipe.safety_checker=None
     pipe.set_progress_bar_config(disable=True)
@@ -573,12 +573,13 @@ def main():
                         print(f"NaN grad: {n}")
 
                 current_lr = lr_sched.get_last_lr()[0]
-                pbar.set_postfix({"l": f"{loss.item():.3f}",
-                                  "raw": f"{raw_mse_loss.item():.3f}",
-                                  "qk": f"{qk_grad_sum:.1e}",
-                                  "gr": f"{total_norm:.1e}",
-                                  #"lr": f"{current_lr:.1e}",
-                                  })
+                pbar.set_postfix_str((f"({batch_count:05})"
+                                      f" l: {loss.item():.3f}"
+                                      f" raw: {raw_mse_loss.item():.3f}"
+                                      f" qk: {qk_grad_sum:.1e}"
+                                      f" gr: {total_norm:.1e}"
+                                      #"lr": f"{current_lr:.1e}",
+                                      ))
 
                 if tb_writer is not None:
                     # overly complicated if gr accum==1, but nice to skip an "if"
