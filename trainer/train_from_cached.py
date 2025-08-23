@@ -290,7 +290,7 @@ def main():
         from reinit import unfreeze_up_blocks
         unfreeze_up_blocks(pipe.unet, args.unfreeze_up_blocks, reset=False)
     if args.unfreeze_down_blocks:
-        print(f"Attempting to unfreeze (({args.unfreeze_down_blocks})) upblocks of Unet")
+        print(f"Attempting to unfreeze (({args.unfreeze_down_blocks})) downblocks of Unet")
         from reinit import unfreeze_down_blocks
         unfreeze_down_blocks(pipe.unet, args.unfreeze_down_blocks, reset=False)
     if args.unfreeze_mid_block:
