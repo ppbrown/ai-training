@@ -125,8 +125,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 import lion_pytorch
 
-torch.backends.cudnn.benchmark = True
+# Speed boost, as long as we dont need "strict fp32 math"
 torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 
 
 # --------------------------------------------------------------------------- #
@@ -573,8 +575,14 @@ def main():
                         print(f"NaN grad: {n}")
 
                 current_lr = lr_sched.get_last_lr()[0]
-                pbar.set_postfix_str((f"({batch_count:05})"
-                                      f" l: {loss.item():.3f}"
+
+
+
+                pbar.set_description_str((
+                        f"E{epoch}/{total_epochs}"
+                        f"({batch_count:05})"
+                        ))
+                pbar.set_postfix_str((f" l: {loss.item():.3f}"
                                       f" raw: {raw_mse_loss.item():.3f}"
                                       f" qk: {qk_grad_sum:.1e}"
                                       f" gr: {total_norm:.1e}"
@@ -641,7 +649,7 @@ def main():
     if accelerator.is_main_process:
         if tb_writer is not None:
             tb_writer.close()
-        if old_code:
+        if False:
             pipe.save_pretrained(args.output_dir, safe_serialization=True)
             sample_img(args.sample_prompt, args.seed, args.output_dir, 
                        custom_pipeline)
