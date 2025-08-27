@@ -444,13 +444,13 @@ def main():
             return
 
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{batch_count:05}")
+        if os.path.exists(ckpt_dir):
+            print(f"Checkpoint {ckpt_dir} already exists. Skipping redundant save")
+            return
         pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
         pipe.unet = accelerator.unwrap_model(unet)
         log_unet_l2_norm(pipe.unet, tb_writer, batch_count)
 
-        if os.path.exists(ckpt_dir):
-            print(f"Checkpoint {ckpt_dir} already exists. Skipping redundant save")
-            return
 
         print(f"Saving checkpoint to {ckpt_dir}")
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
