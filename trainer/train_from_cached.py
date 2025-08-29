@@ -20,7 +20,8 @@ def parse_args():
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
     p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
-    p.add_argument("--epsilon",        type=float, default=1e-5, help="Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
+    p.add_argument("--min_sigma",        type=float, default=1e-5, 
+                   help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
     p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
     p.add_argument("--batch_size",     type=int, default=4)
@@ -30,6 +31,12 @@ def parse_args():
     p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
     p.add_argument("--min_learning_rate",   type=float, default=0.1, 
                    help="Only used if 'min_lr' type schedulers are used")
+    p.add_argument("--rex_start_factor", type=float, default=0.0, help="Only used with REX Scheduler")
+    p.add_argument("--rex_end_factor",   action='store_const', const=1.0, default=1.0,
+                   help='[read-only] fixed at 1.0; providing a value is an error')
+                   #end factor is fixed at 1.0 to avoid odd LR jumps messing things up
+
+
     p.add_argument("--learning_rate_decay", type=float,
                    help="Subtract this every epoch, if schedler==constant")
     p.add_argument("--weight_decay",   type=float)
@@ -423,7 +430,35 @@ def main():
         scheduler_args["scheduler_specific_kwargs"] = {"min_lr_rate": args.min_learning_rate }
         print(f"  Setting default min_lr to {args.min_learning_rate}")
 
-    lr_sched = get_scheduler(args.scheduler, **scheduler_args)
+
+    if args.scheduler.lower() == "rex":
+        from torch.optim.lr_scheduler import LinearLR, SequentialLR
+        from pytorch_optimizer.lr_scheduler.rex import REXScheduler
+
+        if warmup_steps > 0:
+            warmup = LinearLR(
+                optim,
+                start_factor=args.rex_start_factor,
+                end_factor=args.rex_end_factor,
+                total_iters=warmup_steps,
+            )
+            rex = REXScheduler(
+                optim,
+                total_steps=max_steps - warmup_steps,
+                max_lr=peak_lr,                         # uses your pre-existing peak_lr
+                min_lr=args.min_learning_rate,
+            )
+            lr_sched = SequentialLR(optim, [warmup, rex], milestones=[warmup_steps])
+        else:
+            lr_sched = REXScheduler(
+                optim,
+                total_steps=max_steps,
+                max_lr=peak_lr,
+                min_lr=args.min_learning_rate,
+            )
+    else:
+        lr_sched = get_scheduler(args.scheduler, **scheduler_args)
+
     lr_sched = accelerator.prepare(lr_sched)
 
     print(
@@ -526,7 +561,7 @@ def main():
                 else:
                     # Flow Matching: continuous s in [epsilon, 1 - epsilon]
                     bsz = latents.size(0)
-                    eps = args.epsilon  # avoid divide-by-zero magic
+                    eps = args.min_sigma  # avoid divide-by-zero magic
                     noise = torch.randn_like(latents)
                     
                     s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
