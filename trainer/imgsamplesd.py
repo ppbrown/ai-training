@@ -11,6 +11,7 @@ def argproc():
     p.add_argument("--vae_scaling",  type=float)
     p.add_argument("--prompt", nargs="+", type=str,
                    default="woman", help="one or more prompt strings")
+    p.add_argument("--output_directory", type=str)
     return p.parse_args()
 
 args=argproc()
@@ -61,7 +62,11 @@ generator = torch.Generator(device="cuda").manual_seed(seed)
 print(f"Trying render of '{prompt}' using seed {seed}...")
 images = pipe(prompt, num_inference_steps=args.steps, generator=generator).images
 
-OUTDIR=MODEL if os.path.isdir(MODEL) else "./"
+if args.output_directory:
+    OUTDIR=args.output_directory
+else:
+    OUTDIR=MODEL if os.path.isdir(MODEL) else "./"
+
 for i,image in enumerate(images):
     meta = PngImagePlugin.PngInfo()
     meta.add_text("Comment", f"prompt={prompt}")
