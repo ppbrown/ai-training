@@ -326,7 +326,7 @@ def main():
                 )
 
     if hasattr(noise_sched, "add_noise"):
-        print("DEBUG: add_noise present")
+        print("DEBUG: add_noise present. Normal noise sched.")
     else:
         print("DEBUG: add_noise not present: presuming FlowMatch desired")
 
