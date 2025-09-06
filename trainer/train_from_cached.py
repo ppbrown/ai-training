@@ -19,6 +19,8 @@ def parse_args():
                    help="Model provides a 'custom pipeline'")
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
     p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
+    p.add_argument("--scheduler_at_epoch", action="store_true", 
+                   help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
     p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
     p.add_argument("--min_sigma",        type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
@@ -29,9 +31,9 @@ def parse_args():
     p.add_argument('--gradient_checkpointing', action='store_true',
                    help="Enable grad checkpointing in unet")
     p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
-    p.add_argument("--min_learning_rate",   type=float, default=0.1, 
-                   help="Only used if 'min_lr' type schedulers are used")
-    p.add_argument("--rex_start_factor", type=float, default=0.0, help="Only used with REX Scheduler")
+    p.add_argument("--min_lr_ratio",   type=float, default=0.1, 
+                   help="Actually a ratio, not hard number. Only used if 'min_lr' type schedulers are used")
+    p.add_argument("--rex_start_factor", type=float, default=0.0, help="Only used with REX Scheduler during warmup steps")
     p.add_argument("--rex_end_factor",   action='store_const', const=1.0, default=1.0,
                    help='[read-only] fixed at 1.0; providing a value is an error')
                    #end factor is fixed at 1.0 to avoid odd LR jumps messing things up
@@ -61,7 +63,7 @@ def parse_args():
                    help="Only train reset layers")
     p.add_argument("--reinit_crossattn", action="store_true",
                    help="Attempt to reset cross attention weights for text realign")
-    p.add_argument("--reinit_attn", action="store_true",
+    p.add_argument("--reinit_attention", action="store_true",
                    help="Attempt to reset ALL attention weights for text realign")
     p.add_argument("--reinit_qk", action="store_true",
                    help="Attempt to reset just qk weights for text realign")
@@ -83,8 +85,12 @@ def parse_args():
                    help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
     p.add_argument("--unfreeze_mid_block", action="store_true",
                    help="Just unfreeze, dont reinit.")
+    p.add_argument("--unfreeze_norms", action="store_true",
+                   help="Just unfreeze, dont reinit.")
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
+    p.add_argument("--unfreeze_attention", action="store_true",
+                   help="Just unfreeze, dont reinit.")
 
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
     p.add_argument("--seed",        type=int, default=90)
@@ -262,8 +268,8 @@ def main():
         print("Attempting to reset Cross Attn layers of Unet")
         from reinit import reinit_cross_attention
         reinit_cross_attention(pipe.unet)
-    elif args.reinit_attn:
-        print("Attempting to reset Attn layers of Unet")
+    elif args.reinit_attention:
+        print("Attempting to reset attention layers of Unet")
         from reinit import reinit_all_attention
         reinit_all_attention(pipe.unet)
 
@@ -304,7 +310,15 @@ def main():
         print(f"Attempting to unfreeze mid block of Unet")
         from reinit import unfreeze_mid_block
         unfreeze_mid_block(pipe.unet)
+    if args.unfreeze_norms:
+        print(f"Attempting to unfreeze normals components of Unet")
+        from reinit import unfreeze_norms
+        unfreeze_norms(pipe.unet)
 
+    if args.unfreeze_attention:
+        print("Attempting to unfreeze attention layers of Unet")
+        from reinit import unfreeze_all_attention
+        unfreeze_all_attention(pipe.unet)
     # ------------------------------------------ #
 
     if args.cpu_offload:
@@ -427,14 +441,21 @@ def main():
     }
 
     if args.scheduler == "cosine_with_min_lr":
-        scheduler_args["scheduler_specific_kwargs"] = {"min_lr_rate": args.min_learning_rate }
-        print(f"  Setting default min_lr to {args.min_learning_rate}")
+        scheduler_args["scheduler_specific_kwargs"] = {"min_lr_rate": args.min_lr_ratio }
+        print(f"  Setting default min_lr to {args.min_lr_ratio}")
 
 
     if args.scheduler.lower() == "rex":
         from torch.optim.lr_scheduler import LinearLR, SequentialLR
-        from pytorch_optimizer.lr_scheduler.rex import REXScheduler
+        # from pytorch_optimizer.lr_scheduler.rex import REXScheduler - this is not compatible
+        from axolotl.utils.schedulers import RexLR 
 
+        rex = RexLR(
+            optim,
+            total_steps=max_steps - warmup_steps,
+            max_lr=peak_lr,
+            min_lr=peak_lr * args.min_lr_ratio,
+        )
         if warmup_steps > 0:
             warmup = LinearLR(
                 optim,
@@ -442,20 +463,9 @@ def main():
                 end_factor=args.rex_end_factor,
                 total_iters=warmup_steps,
             )
-            rex = REXScheduler(
-                optim,
-                total_steps=max_steps - warmup_steps,
-                max_lr=peak_lr,                         # uses your pre-existing peak_lr
-                min_lr=args.min_learning_rate,
-            )
             lr_sched = SequentialLR(optim, [warmup, rex], milestones=[warmup_steps])
         else:
-            lr_sched = REXScheduler(
-                optim,
-                total_steps=max_steps,
-                max_lr=peak_lr,
-                min_lr=args.min_learning_rate,
-            )
+            lr_sched = rex
     else:
         lr_sched = get_scheduler(args.scheduler, **scheduler_args)
 
@@ -513,13 +523,17 @@ def main():
         if args.save_on_epoch:
             checkpointandsave()
 
+        if args.scheduler_at_epoch:
+            # Implement a stair-stepped decay, updating on epoch to what the smooth would be at this point
+            lr_sched.step(batch_count)
+
         pbar = tqdm(range(steps_per_epoch),
                     desc=f"E{epoch}/{total_epochs}", 
                     bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}", 
                     dynamic_ncols=True,
                     leave=True)
 
-        epoch_step =  0
+        epoch_count =  0
         # "batch" is actually micro-batch
         for batch in dl:
             with accelerator.accumulate(unet):
@@ -609,7 +623,7 @@ def main():
                     if p.grad is not None and torch.isnan(p.grad).any():
                         print(f"NaN grad: {n}")
 
-                current_lr = lr_sched.get_last_lr()[0]
+                current_lr = optim.param_groups[0]["lr"]
 
 
 
@@ -638,7 +652,7 @@ def main():
                         tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
                         tb_writer.add_scalar("train/grad_norm", accum_norm / args.gradient_accum, batch_count)
                         accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
-                        tb_writer.add_scalar("train/epoch_progress", epoch_step / steps_per_epoch,  batch_count)
+                        tb_writer.add_scalar("train/epoch_progress", epoch_count / steps_per_epoch,  batch_count)
 
             # Accelerate will make sure this only gets called on full-batch boundaries
             if accelerator.sync_gradients and (args.gradient_clip is not None and args.gradient_clip > 0):
@@ -649,10 +663,13 @@ def main():
             # We have to take into account gradient accumilation!!
             # This is one reason it has to default to "1", not "0"
             if global_step % args.gradient_accum == 0:
-                optim.step(); lr_sched.step(); optim.zero_grad()
+                optim.step(); 
+                optim.zero_grad()
+                if not args.scheduler_at_epoch:
+                    lr_sched.step(); 
                 pbar.update(1)
                 batch_count += 1
-                epoch_step += 1
+                epoch_count += 1
 
                 trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
                 if os.path.exists(trigger_path):
@@ -670,7 +687,6 @@ def main():
                 elif args.save_steps and (batch_count % args.save_steps == 0):
                     print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
                     checkpointandsave()
-
 
 
             if batch_count >= max_steps:
