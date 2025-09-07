@@ -304,3 +304,53 @@ def unfreeze_up_mid_blocks(unet, n, reset=False):
     """
     unfreeze_up_blocks(unet, n, reset)
     unfreeze_mid_block(unet)
+
+# Norm modules we know, plus a generic "Norm" substring catch for custom classes
+_NORM_TYPES = (
+    nn.GroupNorm, nn.LayerNorm,
+    nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+    nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d,
+)
+
+def unfreeze_norms(unet, *, include_bias: bool = True) -> int:
+    """
+    Set requires_grad flag on all normalization parameters (γ/β) inside `unet
+    These parameters are typically used for per-channel scale and shift, so useful
+    to focus on them when doing things like a VAE swap
+
+    Args:
+        unet: root module to scan (e.g., a Diffusers UNet2DConditionModel).
+        include_bias: also unfreeze bias terms if present.
+
+    Returns:
+        Count of tensors whose requires_grad was changed.
+    """
+    def _is_norm(mod: nn.Module) -> bool:
+        # Catch both standard nn.*Norm and custom Diffusers norms (class name contains "Norm")
+        return isinstance(mod, _NORM_TYPES) or ("Norm" in mod.__class__.__name__)
+
+    toggled = 0
+    for name, mod in unet.named_modules():
+        if _is_norm(mod):
+            if getattr(mod, "weight", None) is not None:
+                mod.weight.requires_grad = True
+                toggled += 1
+            if include_bias and getattr(mod, "bias", None) is not None:
+                mod.bias.requires_grad = True
+                toggled += 1
+    return toggled
+def unfreeze_all_attention(unet):
+    def is_attn(m):
+        n = m.__class__.__name__
+        return ("Attention" in n) or ("Transformer" in n)
+    # freeze all first
+    for p in unet.parameters(): p.requires_grad = False
+    # unfreeze attention everywhere
+    for _, m in unet.named_modules():
+        if is_attn(m):
+            for p in m.parameters():
+                p.requires_grad = True
+    # optional: keep I/O edges adapting a bit
+    for m in (unet.conv_in, unet.conv_out):
+        for p in m.parameters():
+            p.requires_grad = True
