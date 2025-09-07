@@ -14,6 +14,9 @@ from tqdm.auto import tqdm
 
 import torch
 import torchvision.transforms as TVT
+from torchvision.transforms import InterpolationMode as IM
+import torchvision.transforms.functional as F
+
 import safetensors.torch as st
 from diffusers import DiffusionPipeline
 from PIL import Image
@@ -46,7 +49,8 @@ def parse_args():
                    help="Directory containing images (recursively searched)")
     p.add_argument("--out_suffix", default=".img_sdxl", 
                    help="File suffix for saved latents(default: .img_sdxl)")
-    p.add_argument("--resolution", type=int, default=512, help="Resolution for images (default: 512)")
+    p.add_argument("--target_width", type=int, default=512, help="Width Resolution for images (default: 512)")
+    p.add_argument("--target_height", type=int, default=512, help="Height Resolution for images (default: 512)")
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png", "webp"])
     p.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
@@ -58,11 +62,22 @@ def find_images(input_dir, exts):
         images += list(Path(input_dir).rglob(f"*.{ext}"))
     return sorted(images)
 
-def get_transform(size):
+
+# Resize to height, while preserving aspect ratio.
+# Then crop to width
+def make_cover_resize_center_crop(w: int, h: int):
+    def _f(img):
+        H, W = img.height, img.width
+        scalefactor = h / H
+        newH, newW = round(H*scalefactor), round(W*scalefactor)
+        img = F.resize(img, (newH, newW), interpolation=IM.BICUBIC, antialias=True)
+        return F.center_crop(img, (h, w))
+    return _f
+
+def get_transform(width, height):
     return TVT.Compose([
-        TVT.Lambda(lambda im: im.convert("RGB")),
-        TVT.Resize(size, interpolation=Image.BICUBIC),
-        TVT.CenterCrop(size),
+        lambda im: im.convert("RGB"),
+        make_cover_resize_center_crop(width, height),
         TVT.ToTensor(),
         # Have to do this before appplying VAE!!
         TVT.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
@@ -102,7 +117,7 @@ def main():
         print(f"Skipped {skipped} files with existing cache.")
 
 
-    tfm = get_transform(args.resolution)
+    tfm = get_transform(args.target_width, args.target_height, )
 
 
     print(f"Processing {len(image_paths)} images from {args.data_root}")
