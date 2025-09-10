@@ -21,7 +21,7 @@ def parse_args():
     p.add_argument("--scheduler",      type=str, default="constant", help="Default=constant")
     p.add_argument("--scheduler_at_epoch", action="store_true", 
                    help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
-    p.add_argument("--optimizer",      type=str, choices=["adamw8","lion", "d_lion"], default="adamw8")
+    p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","lion","d_lion"], default="adamw8")
     p.add_argument("--num_cycles",     type=float, help="Typically only used with cosine decay")
     p.add_argument("--min_sigma",      type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
@@ -427,6 +427,13 @@ def main():
                                     lr=peak_lr, 
                                     **opt_args
                                     )
+    elif args.optimizer == "adamw":
+        from transformers import AdamW
+        optim = AdamW(
+            trainable_params,
+            lr=peak_lr,
+            **opt_args
+        )
     else:
         print("ERROR: unrecognized optimizer setting")
         exit(1)
@@ -640,7 +647,9 @@ def main():
                     if p.grad is not None and torch.isnan(p.grad).any():
                         print(f"NaN grad: {n}")
 
-                current_lr = optim.param_groups[0]["lr"]
+                current_lr = float(optim.param_groups[0]["lr"])
+                if args.optimizer.startswith("d_"):
+                    current_lr *= float(optim.param_groups[0]["d"])
 
 
 
