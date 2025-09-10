@@ -18,11 +18,12 @@ def parse_args():
     p.add_argument("--is_custom", action="store_true",
                    help="Model provides a 'custom pipeline'")
     p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
-    p.add_argument("--scheduler", type=str, default="constant", help="Default=constant")
+    p.add_argument("--scheduler",      type=str, default="constant", help="Default=constant")
     p.add_argument("--scheduler_at_epoch", action="store_true", 
                    help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
-    p.add_argument("--optimizer",      type=str, choices=["adamw8","lion"], default="adamw8")
-    p.add_argument("--min_sigma",        type=float, default=1e-5, 
+    p.add_argument("--optimizer",      type=str, choices=["adamw8","lion", "d_lion"], default="adamw8")
+    p.add_argument("--num_cycles",     type=float, help="Typically only used with cosine decay")
+    p.add_argument("--min_sigma",      type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
     p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
@@ -30,11 +31,11 @@ def parse_args():
     p.add_argument("--gradient_accum", type=int, default=1, help="Default=1")
     p.add_argument('--gradient_checkpointing', action='store_true',
                    help="Enable grad checkpointing in unet")
-    p.add_argument("--learning_rate",   type=float, default=1e-5, help="Default=1e-5")
+    p.add_argument("--learning_rate",  type=float, default=1e-5, help="Default=1e-5")
     p.add_argument("--min_lr_ratio",   type=float, default=0.1, 
                    help="Actually a ratio, not hard number. Only used if 'min_lr' type schedulers are used")
     p.add_argument("--rex_start_factor", type=float, default=0.0, help="Only used with REX Scheduler during warmup steps")
-    p.add_argument("--rex_end_factor",   action='store_const', const=1.0, default=1.0,
+    p.add_argument("--rex_end_factor", action='store_const', const=1.0, default=1.0,
                    help='[read-only] fixed at 1.0; providing a value is an error')
                    #end factor is fixed at 1.0 to avoid odd LR jumps messing things up
 
@@ -44,13 +45,13 @@ def parse_args():
     p.add_argument("--weight_decay",   type=float)
     p.add_argument("--vae_scaling_factor", type=float, help="Override vae scaling factor")
     p.add_argument("--text_scaling_factor", type=float, help="Override embedding scaling factor")
-    p.add_argument("--warmup_steps",    type=int, default=0, 
+    p.add_argument("--warmup_steps",   type=int, default=0, 
                    help="Measured in effective batchsize steps (b * a) default=0")
-    p.add_argument("--max_steps",       default=10_000, 
+    p.add_argument("--max_steps",      default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
-    p.add_argument("--save_steps",    type=int, help="Measured in effective batchsize(b * a)")
-    p.add_argument("--save_on_epoch", action="store_true")
-    p.add_argument("--noise_gamma",     type=float, default=5.0)
+    p.add_argument("--save_steps",     type=int, help="Measured in effective batchsize(b * a)")
+    p.add_argument("--save_on_epoch",  action="store_true")
+    p.add_argument("--noise_gamma",    type=float, default=5.0)
     p.add_argument("--betas",  type=float, nargs=2, metavar=("BETA1","BETA2"),
                    help="Typical LION default is '0.9, 0.99'." \
                    "For instability issues,  use 0.95 0.98")
@@ -363,6 +364,15 @@ def main():
         for p in pipe.t5_projection.parameters(): p.requires_grad_(False)
 
 
+    # Gather just-trainable parameters
+    trainable_params = [p for p in unet.parameters() if p.requires_grad]
+    if not trainable_params:
+        print("ERROR: no layers selected for training")
+        exit(0)
+    print(
+        f"Align-phase: {sum(p.numel() for p in trainable_params)/1e6:.2f} M "
+        "parameters will be updated"
+    )
 
     # ----- load data ------------------------------------------------------------ #
     ds = CaptionImgDataset(args.train_data_dir, 
@@ -386,12 +396,6 @@ def main():
     else:
         max_steps = int(args.max_steps)
 
-    # Gather just-trainable parameters
-    trainable_params = [p for p in unet.parameters() if p.requires_grad]
-    if not trainable_params:
-        print("ERROR: no layers selected for training")
-        exit(0)
-
     # Common args that may or may not be defined
     # Allow fall-back to optimizer-specific defaults
     opt_args = {
@@ -404,6 +408,19 @@ def main():
                                   lr=peak_lr, 
                                   **opt_args
                                   )
+    elif args.optimizer == "d_lion":
+        from dadaptation import DAdaptLion
+        # D-Adapt controls the step size; a large/base LR is expected.
+        # 1.0 is the common choice; fall back to peak_lr if you've set one.
+        base_lr = peak_lr
+        if base_lr < 0.1:
+            print("WARNING: Typically, DAdaptLion expects LR of 1.0")
+
+        optim = DAdaptLion(
+            trainable_params,
+            lr=base_lr,
+            **opt_args
+        )
     elif args.optimizer == "adamw8":
         import bitsandbytes as bnb
         optim = bnb.optim.AdamW8bit(trainable_params, 
@@ -440,9 +457,14 @@ def main():
         "num_training_steps": max_steps,
     }
 
+    scheduler_args["scheduler_specific_kwargs"] = {}
     if args.scheduler == "cosine_with_min_lr":
-        scheduler_args["scheduler_specific_kwargs"] = {"min_lr_rate": args.min_lr_ratio }
-        print(f"  Setting default min_lr to {args.min_lr_ratio}")
+        scheduler_args["scheduler_specific_kwargs"]["min_lr_rate"] = args.min_lr_ratio 
+        print(f"  Setting min_lr_ratio to {args.min_lr_ratio}")
+    if args.num_cycles:
+        #technically this should only be used for cosine types?
+        scheduler_args["scheduler_specific_kwargs"]["num_cycles"] = args.num_cycles 
+        print(f"  Setting num_cycles to {args.num_cycles}")
 
 
     if args.scheduler.lower() == "rex":
@@ -470,11 +492,6 @@ def main():
         lr_sched = get_scheduler(args.scheduler, **scheduler_args)
 
     lr_sched = accelerator.prepare(lr_sched)
-
-    print(
-        f"Align-phase: {sum(p.numel() for p in trainable_params)/1e6:.2f} M "
-        "parameters will be updated"
-    )
 
     global_step = 0 
     batch_count = 0
