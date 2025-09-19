@@ -17,12 +17,12 @@ from torch.utils.data import Dataset
 class CaptionImgDataset(Dataset):
     """ Class to store paths to img/txt cache file files, as loaded from the
     one or more directory names passed at init.
-    If defined, both batch size and accum must be whole integers >= 1 
-    Then will then be used to cleanly truncate total number of files in the dataset, if needed.
+    Both batch size and accum must be whole integers >= 1 
+    They will then be used to cleanly truncate total number of files in the dataset, if needed.
     """
     def __init__(self, root_dirs, 
                  imgcache_suffix=".img_cache", txtcache_suffix=".txt_t5cache",
-                 batch_size=None, gradient_accum=None):
+                 batch_size, gradient_accum=1):
         self.files = []
         extset = ("jpg", "png")
         for root in root_dirs:
@@ -43,13 +43,12 @@ class CaptionImgDataset(Dataset):
 
         print(f"Total cache pairs found: {len(self.files)}")
 
-        if batch_size is not None and gradient_accum is not None:
-            num_batches = len(self.files) // batch_size
-            even_batches = (num_batches // gradient_accum) * gradient_accum
-            trimmed_len = even_batches * batch_size
-            if trimmed_len < len(self.files):
-                print(f"Trimming dataset from {len(self.files)} to {trimmed_len} for even accumulation.")
-                self.files = self.files[:trimmed_len]
+        num_batches = len(self.files) // batch_size
+        even_batches = (num_batches // gradient_accum) * gradient_accum
+        trimmed_len = even_batches * batch_size
+        if trimmed_len < len(self.files):
+            print(f"Trimming dataset from {len(self.files)} to {trimmed_len} for even accumulation.")
+            self.files = self.files[:trimmed_len]
 
         print(f"Final dataset length: {len(self.files)}")
 
