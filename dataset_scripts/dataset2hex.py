@@ -16,16 +16,20 @@ It will then create a symlink from an appropriate cache dir under the new tree
 to the original source image.
 It will also link any matching .txt file
 
-Example:
-A jpg file with chksum ac53454543534  will be linked from
+USAGE SUMMARY:
+  SRCDIR=/path/to/topsrc
+  DESTDIR=/new/dir
+  mkdir $DESTDIR
+  find $SRCDIR -name '*jpg' | prog $DESTDIR
+
+Sample Results:
+If a jpg file in the SRCDIR exists, and has chksum ac53454543534 ,
+this program will create a symlink pointing to it, from
  DESTDIR/ac/ac5345454543534.jpg
 
 IMPORTANT:
-The easy way to call this is:
 
-    find /path/to/topsrc -name '*jpg' | prog /new/dir/top
-
-However, if you want to use relative symlinks, you have to get
+If you want to use relative symlinks, you have to get
 a bit fancy and do something like
 
     mkdir /new/dir/top/tmpdir && cd /new/dir/top/tmpdir
