@@ -34,7 +34,7 @@ def parse_args():
     p.add_argument("--learning_rate",  type=float, default=1e-5, help="Default=1e-5")
     p.add_argument("--min_lr_ratio",   type=float, default=0.1, 
                    help="Actually a ratio, not hard number. Only used if 'min_lr' type schedulers are used")
-    p.add_argument("--rex_start_factor", type=float, default=0.0, help="Only used with REX Scheduler during warmup steps")
+    p.add_argument("--rex_start_factor", type=float, default=1.0, help="Only used with REX Scheduler during warmup steps. Must be greater than 0. Default=1")
     p.add_argument("--rex_end_factor", action='store_const', const=1.0, default=1.0,
                    help='[read-only] fixed at 1.0; providing a value is an error')
                    #end factor is fixed at 1.0 to avoid odd LR jumps messing things up
@@ -45,7 +45,7 @@ def parse_args():
     p.add_argument("--weight_decay",   type=float)
     p.add_argument("--vae_scaling_factor", type=float, help="Override vae scaling factor")
     p.add_argument("--text_scaling_factor", type=float, help="Override embedding scaling factor")
-    p.add_argument("--warmup_steps",   type=int, default=0, 
+    p.add_argument("--warmup_steps",   default=0, 
                    help="Measured in effective batchsize steps (b * a) default=0")
     p.add_argument("--max_steps",      default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
@@ -203,7 +203,6 @@ def log_unet_l2_norm(unet, tb_writer, step):
 def main():
     torch.manual_seed(args.seed)
     peak_lr       = args.learning_rate
-    warmup_steps  = args.warmup_steps
 
     print("Training type:", "fp32" if args.fp32 else "mixed precision")
 
@@ -390,11 +389,17 @@ def main():
     bs = args.batch_size ; accum = args.gradient_accum
     effective_batch_size = bs * accum
     steps_per_epoch = len(dl) // accum # dl count already divided by mini batch
+
     if args.max_steps and args.max_steps.endswith("e"):
-        max_steps = int(args.max_steps.removesuffix("e"))
+        max_steps = float(args.max_steps.removesuffix("e"))
         max_steps = max_steps * steps_per_epoch
     else:
         max_steps = int(args.max_steps)
+    if args.warmup_steps.endswith("e"):
+        warmup_steps = float(args.warmup_steps.removesuffix("e"))
+        warmup_steps = warmup_steps * steps_per_epoch
+    else:
+        warmup_steps  = int(args.warmup_steps)
 
     # Common args that may or may not be defined
     # Allow fall-back to optimizer-specific defaults
@@ -449,7 +454,7 @@ def main():
 
     print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
-    print("        betas=",
+    print(f"        warmup={warmup_steps}, betas=",
           args.betas if args.betas else "(default)",
           " weight_decay=",
           args.weight_decay if args.weight_decay else "(default)",
