@@ -1,10 +1,13 @@
 
-# The "train" python programs import this
+# The "train" python programs import this,
+# to collect the filepaths of a "captioned dataset".
+#  Actually loading in the dataset comes later
 
 # Note that this is specifically targetted for use with the CACHING versions
 # of my training scripts
 # So it will go look for the img and text files as a safety....
 # but it will only actually record the paths to the CACHE FILES
+# See imgcache_suffix and txtcache_suffix
 
 from pathlib import Path
 
@@ -12,7 +15,11 @@ from torch.utils.data import Dataset
 
 
 class CaptionImgDataset(Dataset):
-    """If defined, both batch size and accum must be whole integers >= 1 """
+    """ Class to store paths to img/txt cache file files, as loaded from the
+    one or more directory names passed at init.
+    If defined, both batch size and accum must be whole integers >= 1 
+    Then will then be used to cleanly truncate total number of files in the dataset, if needed.
+    """
     def __init__(self, root_dirs, 
                  imgcache_suffix=".img_cache", txtcache_suffix=".txt_t5cache",
                  batch_size=None, gradient_accum=None):
