@@ -20,9 +20,9 @@ class CaptionImgDataset(Dataset):
     Both batch size and accum must be whole integers >= 1 
     They will then be used to cleanly truncate total number of files in the dataset, if needed.
     """
-    def __init__(self, root_dirs, 
+    def __init__(self, root_dirs, batch_size,
                  imgcache_suffix=".img_cache", txtcache_suffix=".txt_t5cache",
-                 batch_size, gradient_accum=1):
+                 gradient_accum=1):
         self.files = []
         extset = ("jpg", "png")
         for root in root_dirs:
@@ -39,7 +39,9 @@ class CaptionImgDataset(Dataset):
             print(f"Cache pairs found: {subtotal}")
 
         if not self.files:
-            raise RuntimeError("No valid cache pairs found! Did you run your cache pre-processing script?")
+            raise RuntimeError("No valid cache pairs found! " \
+                    "Did you run your cache pre-processing script?\n" \
+                    f"{root_dirs}")
 
         print(f"Total cache pairs found: {len(self.files)}")
 
