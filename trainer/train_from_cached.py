@@ -17,11 +17,12 @@ def parse_args():
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
     p.add_argument("--is_custom", action="store_true",
                    help="Model provides a 'custom pipeline'")
-    p.add_argument("--train_data_dir",  nargs="+", required=True,  help="Directory tree(s) containing *.jpg + *.txt")
+    p.add_argument("--train_data_dir",  nargs="+", required=True, action="append",
+                   help="Directory tree(s) containing *.jpg + *.txt.\nCan use more than once, but make sure same resolution for each")
     p.add_argument("--scheduler",      type=str, default="constant", help="Default=constant")
     p.add_argument("--scheduler_at_epoch", action="store_true", 
                    help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
-    p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","lion","d_lion"], default="adamw8")
+    p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","py_lion","opt_lion", "d_lion"], default="adamw8")
     p.add_argument("--num_cycles",     type=float, help="Typically only used with cosine decay")
     p.add_argument("--min_sigma",      type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
@@ -337,14 +338,12 @@ def main():
     vae, unet = pipe.vae.eval(), pipe.unet
 
     noise_sched = pipe.scheduler
-    print("Pipe wants to use noise scheduler", type(noise_sched))
-    if isinstance(noise_sched, PNDMScheduler):
-        print("Overriding noise scheduler from PNDMScheduler to DDPMScheduler")
-        noise_sched = DDPMScheduler(
-                num_train_timesteps=1000, # DIFFERENT from lr_sched num_training_steps
-                # beta_schedule="cosine", # "cosine not implemented for DDPMScheduler"
-                clip_sample=False
-                )
+    print("Pipe is using noise scheduler", type(noise_sched))
+    """
+    It was once suggested to swap out  PNDMScheduler for DDPMScheduler,
+    JUST for training.
+    DO NOT DO THIS. It screwed everything up.
+    """
 
     if hasattr(noise_sched, "add_noise"):
         print("DEBUG: add_noise present. Normal noise sched.")
@@ -374,21 +373,29 @@ def main():
     )
 
     # ----- load data ------------------------------------------------------------ #
-    ds = CaptionImgDataset(args.train_data_dir, 
-                           txtcache_suffix=args.txtcache_suffix,
-                           imgcache_suffix=args.imgcache_suffix,
-                           batch_size=args.batch_size,
-                           gradient_accum=args.gradient_accum
-                           )
-    dl = DataLoader(ds, batch_size=args.batch_size, 
-                    shuffle=True, drop_last=True,
-                    num_workers=8, persistent_workers=True,
-                    pin_memory=True, collate_fn=collate_fn,
-                    prefetch_factor=4)
-
     bs = args.batch_size ; accum = args.gradient_accum
     effective_batch_size = bs * accum
-    steps_per_epoch = len(dl) // accum # dl count already divided by mini batch
+    dataloaders = []; steps_per_epoch = 0
+
+    for dirs in args.train_data_dir:
+        ds = CaptionImgDataset(dirs, 
+                               batch_size=bs,
+                               txtcache_suffix=args.txtcache_suffix,
+                               imgcache_suffix=args.imgcache_suffix,
+                               gradient_accum=accum
+                               )
+
+        # Yes keep this using microbatch not effective batch
+        # drop_last=True not needed: ds should have self-truncated
+        dl = DataLoader(ds, batch_size=bs, 
+                        shuffle=True,
+                        num_workers=8, persistent_workers=True,
+                        pin_memory=True, collate_fn=collate_fn,
+                        prefetch_factor=4)
+
+        dataloaders.append(dl)
+        # dl count already divided by mini batch
+        steps_per_epoch += len(dl) // accum 
 
     if args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
@@ -407,9 +414,15 @@ def main():
         **({'weight_decay': args.weight_decay} if args.weight_decay is not None else {}),
         **({'betas': tuple(args.betas)} if args.betas else {}),
     }
-    if args.optimizer == "lion":
+    if args.optimizer == "py_lion":
         import lion_pytorch
         optim = lion_pytorch.Lion(trainable_params, 
+                                  lr=peak_lr, 
+                                  **opt_args
+                                  )
+    elif args.optimizer == "opt_lion":
+        from optimi import Lion # torch-optimi pip module
+        optim = Lion(trainable_params, 
                                   lr=peak_lr, 
                                   **opt_args
                                   )
@@ -433,7 +446,7 @@ def main():
                                     **opt_args
                                     )
     elif args.optimizer == "adamw":
-        from transformers import AdamW
+        from torch.optim import AdamW
         optim = AdamW(
             trainable_params,
             lr=peak_lr,
@@ -538,6 +551,168 @@ def main():
                 tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
                 shutil.copy(args.copy_config, args.output_dir)
 
+    def train_micro_batch(unet):
+        nonlocal batch_count, global_step, accum_loss, accum_mse, accum_qk, accum_norm, epoch_count
+
+        with accelerator.accumulate(unet):
+            # --- Load latents & prompt embeddings from cache ---
+            latents = []
+            for cache_file in batch["img_cache"]:
+                latent = st.load_file(cache_file)["latent"]
+                latents.append(latent)
+            latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
+
+            embeds = []
+            for cache_file in batch["txt_cache"]:
+                if Path(cache_file).suffix == ".h5":
+                    arr = h5f["emb"][:]
+                    emb = torch.from_numpy(arr)
+                else:
+                    try:
+                        emb = st.load_file(cache_file)["emb"]
+                    except Exception as e:
+                        print("Error loading these files...")
+                        print(cache_file)
+                        exit(0)
+                emb = emb.to(device, dtype=compute_dtype)
+                embeds.append(emb)
+            prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
+
+            # --- Add noise ---
+
+            if hasattr(noise_sched, "add_noise"):
+                # Standard DDPM/PNDM-style
+                noise = torch.randn_like(latents)
+                bsz = latents.size(0)
+                timesteps = torch.randint(
+                    0, noise_sched.config.num_train_timesteps,
+                    (bsz,), device=device, dtype=torch.long
+                )
+                noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
+                noise_target = noise
+            else:
+                # Flow Matching: continuous s in [epsilon, 1 - epsilon]
+                bsz = latents.size(0)
+                eps = args.min_sigma  # avoid divide-by-zero magic
+                noise = torch.randn_like(latents)
+                
+                s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
+                timesteps = s.to(torch.float32).mul(999.0)
+
+                s = s.view(-1, *([1] * (latents.dim() - 1)))  # broadcasting [B,1,1,1]
+
+                noisy_latents = s * noise + (1 - s) * latents
+                noise_target = noise - latents
+
+            # --- UNet forward & loss ---
+            model_pred = unet(noisy_latents, timesteps,
+                              encoder_hidden_states=prompt_emb).sample
+
+            mse = torch.nn.functional.mse_loss(
+                    model_pred.float(), noise_target.float(), reduction="none")
+            mse = mse.view(mse.size(0), -1).mean(dim=1)
+            raw_mse_loss = mse.mean()
+
+            if args.use_snr:
+                snr = compute_snr(noise_sched, timesteps)
+                gamma = args.noise_gamma
+                gamma_tensor = torch.full_like(snr, gamma)
+                weights = torch.minimum(snr, gamma_tensor) / (snr + 1e-8)
+                loss = (weights * mse).mean()
+            else:
+                loss = raw_mse_loss
+
+            accelerator.wait_for_everyone()
+            accelerator.backward(loss)
+
+        # -----logging & ckp save  ----------------------------------------- #
+        if accelerator.is_main_process:
+            qk_grad_sum = sum(
+                    p.grad.abs().mean().item()
+                    for n,p in unet.named_parameters()
+                    if p.grad is not None and (".to_q" in n or ".to_k" in n))
+            total_norm = 0.0
+            for p in unet.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** 0.5
+            for n, p in unet.named_parameters():
+                if p.grad is not None and torch.isnan(p.grad).any():
+                    print(f"NaN grad: {n}")
+
+            current_lr = float(optim.param_groups[0]["lr"])
+            if args.optimizer.startswith("d_"):
+                current_lr *= float(optim.param_groups[0]["d"])
+
+
+
+            pbar.set_description_str((
+                    f"E{epoch}/{total_epochs}"
+                    f"({batch_count:05})"  #PROBLEM HERE
+                    ))
+            pbar.set_postfix_str((f" l: {loss.item():.3f}"
+                                  f" raw: {raw_mse_loss.item():.3f}"
+                                  f" qk: {qk_grad_sum:.1e}"
+                                  f" gr: {total_norm:.1e}"
+                                  #"lr": f"{current_lr:.1e}",
+                                  ))
+
+            if tb_writer is not None:
+                # overly complicated if gr accum==1, but nice to skip an "if"
+                accum_loss += loss.item()
+                accum_mse += raw_mse_loss.item()
+                accum_qk += qk_grad_sum
+                accum_norm += total_norm
+                if global_step % args.gradient_accum == 0:
+                    tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
+                    if args.use_snr:
+                        tb_writer.add_scalar("train/loss_snr", accum_loss / args.gradient_accum, batch_count)
+                    tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
+                    tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
+                    tb_writer.add_scalar("train/grad_norm", accum_norm / args.gradient_accum, batch_count)
+                    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
+                    tb_writer.add_scalar("train/epoch_progress", epoch_count / steps_per_epoch,  batch_count)
+
+        # Accelerate will make sure this only gets called on full-batch boundaries
+        if accelerator.sync_gradients and (args.gradient_clip is not None and args.gradient_clip > 0):
+                accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
+
+
+        global_step += 1
+        # We have to take into account gradient accumilation!!
+        # This is one reason it has to default to "1", not "0"
+        if global_step % args.gradient_accum == 0:
+            optim.step(); 
+            optim.zero_grad()
+            if not args.scheduler_at_epoch:
+                lr_sched.step(); 
+            pbar.update(1)
+            batch_count += 1
+            epoch_count += 1
+
+            trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+            if os.path.exists(trigger_path):
+                print("trigger.checkpoint detected. ...")
+                # It is tempting to put this in the same place as the other save.
+                # But, we want to include this one in the 
+                #   "did we complete a full batch?"
+                # logic
+                checkpointandsave()
+                try:
+                    os.remove(trigger_path)
+                except Exception as e:
+                    print("warning: got exception", e)
+
+            elif args.save_steps and (batch_count % args.save_steps == 0):
+                print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
+                checkpointandsave()
+
+
+    ################## end of def train_micro_batch():
+
+
+
     # ----- training loop --------------------------------------------------- #
     """ Old way
     ebar = tqdm(range(math.ceil(max_steps / len(dl))), 
@@ -563,167 +738,18 @@ def main():
                     leave=True)
 
         epoch_count =  0
+
         # "batch" is actually micro-batch
-        for batch in dl:
-            with accelerator.accumulate(unet):
-                # --- Load latents & prompt embeddings from cache ---
-                latents = []
-                for cache_file in batch["img_cache"]:
-                    latent = st.load_file(cache_file)["latent"]
-                    latents.append(latent)
-                latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
-
-                embeds = []
-                for cache_file in batch["txt_cache"]:
-                    if Path(cache_file).suffix == ".h5":
-                        arr = h5f["emb"][:]
-                        emb = torch.from_numpy(arr)
-                    else:
-                        try:
-                            emb = st.load_file(cache_file)["emb"]
-                        except Exception as e:
-                            print("Error loading these files...")
-                            print(cache_file)
-                            exit(0)
-                    emb = emb.to(device, dtype=compute_dtype)
-                    embeds.append(emb)
-                prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
-
-                # --- Add noise ---
-
-                if hasattr(noise_sched, "add_noise"):
-                    # Standard DDPM/PNDM-style
-                    noise = torch.randn_like(latents)
-                    bsz = latents.size(0)
-                    timesteps = torch.randint(
-                        0, noise_sched.config.num_train_timesteps,
-                        (bsz,), device=device, dtype=torch.long
-                    )
-                    noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
-                    noise_target = noise
-                else:
-                    # Flow Matching: continuous s in [epsilon, 1 - epsilon]
-                    bsz = latents.size(0)
-                    eps = args.min_sigma  # avoid divide-by-zero magic
-                    noise = torch.randn_like(latents)
-                    
-                    s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
-                    timesteps = s.to(torch.float32).mul(999.0)
-
-                    s = s.view(-1, *([1] * (latents.dim() - 1)))  # broadcasting [B,1,1,1]
-
-                    noisy_latents = s * noise + (1 - s) * latents
-                    noise_target = noise - latents
-
-                # --- UNet forward & loss ---
-                model_pred = unet(noisy_latents, timesteps,
-                                  encoder_hidden_states=prompt_emb).sample
-
-                mse = torch.nn.functional.mse_loss(
-                        model_pred.float(), noise_target.float(), reduction="none")
-                mse = mse.view(mse.size(0), -1).mean(dim=1)
-                raw_mse_loss = mse.mean()
-
-                if args.use_snr:
-                    snr = compute_snr(noise_sched, timesteps)
-                    gamma = args.noise_gamma
-                    gamma_tensor = torch.full_like(snr, gamma)
-                    weights = torch.minimum(snr, gamma_tensor) / (snr + 1e-8)
-                    loss = (weights * mse).mean()
-                else:
-                    loss = raw_mse_loss
-
-                accelerator.wait_for_everyone()
-                accelerator.backward(loss)
-
-            # -----logging & ckp save  ----------------------------------------- #
-            if accelerator.is_main_process:
-                qk_grad_sum = sum(
-                        p.grad.abs().mean().item()
-                        for n,p in unet.named_parameters()
-                        if p.grad is not None and (".to_q" in n or ".to_k" in n))
-                total_norm = 0.0
-                for p in unet.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                total_norm = total_norm ** 0.5
-                for n, p in unet.named_parameters():
-                    if p.grad is not None and torch.isnan(p.grad).any():
-                        print(f"NaN grad: {n}")
-
-                current_lr = float(optim.param_groups[0]["lr"])
-                if args.optimizer.startswith("d_"):
-                    current_lr *= float(optim.param_groups[0]["d"])
 
 
 
-                pbar.set_description_str((
-                        f"E{epoch}/{total_epochs}"
-                        f"({batch_count:05})"
-                        ))
-                pbar.set_postfix_str((f" l: {loss.item():.3f}"
-                                      f" raw: {raw_mse_loss.item():.3f}"
-                                      f" qk: {qk_grad_sum:.1e}"
-                                      f" gr: {total_norm:.1e}"
-                                      #"lr": f"{current_lr:.1e}",
-                                      ))
 
-                if tb_writer is not None:
-                    # overly complicated if gr accum==1, but nice to skip an "if"
-                    accum_loss += loss.item()
-                    accum_mse += raw_mse_loss.item()
-                    accum_qk += qk_grad_sum
-                    accum_norm += total_norm
-                    if global_step % args.gradient_accum == 0:
-                        tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
-                        if args.use_snr:
-                            tb_writer.add_scalar("train/loss_snr", accum_loss / args.gradient_accum, batch_count)
-                        tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
-                        tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
-                        tb_writer.add_scalar("train/grad_norm", accum_norm / args.gradient_accum, batch_count)
-                        accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
-                        tb_writer.add_scalar("train/epoch_progress", epoch_count / steps_per_epoch,  batch_count)
+        for dl in dataloaders:
+            for batch in dl:
+                if batch_count >= max_steps:
+                    break
+                train_micro_batch(unet)
 
-            # Accelerate will make sure this only gets called on full-batch boundaries
-            if accelerator.sync_gradients and (args.gradient_clip is not None and args.gradient_clip > 0):
-                    accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
-
-
-            global_step += 1
-            # We have to take into account gradient accumilation!!
-            # This is one reason it has to default to "1", not "0"
-            if global_step % args.gradient_accum == 0:
-                optim.step(); 
-                optim.zero_grad()
-                if not args.scheduler_at_epoch:
-                    lr_sched.step(); 
-                pbar.update(1)
-                batch_count += 1
-                epoch_count += 1
-
-                trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
-                if os.path.exists(trigger_path):
-                    print("trigger.checkpoint detected. ...")
-                    # It is tempting to put this in the same place as the other save.
-                    # But, we want to include this one in the 
-                    #   "did we complete a full batch?"
-                    # logic
-                    checkpointandsave()
-                    try:
-                        os.remove(trigger_path)
-                    except Exception as e:
-                        print("warning: got exception", e)
-
-                elif args.save_steps and (batch_count % args.save_steps == 0):
-                    print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
-                    checkpointandsave()
-
-
-            if batch_count >= max_steps:
-                break
-
-        # ----- end of "for batch in pbar" loop ------
         pbar.close()
         if batch_count >= max_steps:
             break
