@@ -273,7 +273,7 @@ def unfreeze_up_block(unet, n, reset=False):
 def unfreeze_down_blocks(unet, blocknum: list[int], reset=False):
     if hasattr(unet, 'down_blocks'):
         for ndx in blocknum:
-            downblock = unet.up_blocks[ndx]
+            downblock = unet.down_blocks[ndx]
             if reset:
                 for m in downblock.modules():
                     if hasattr(m, 'reset_parameters'):
