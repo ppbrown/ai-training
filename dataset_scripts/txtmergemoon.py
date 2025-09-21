@@ -3,7 +3,6 @@
 # Change name as desired
 FIELD="moondream" 
 
-
 """
 Synopsis: allows adding of new captions to existing .jsonl file
 
@@ -23,8 +22,9 @@ Note: will only print lines actually matched from original jsonl file
 
 ## Usage:
 
-    thisscript origdata.jsonl < list_of_imgfiles > new.jsonl
+    thisscript origdata.jsonl < list_of_txtfiles > new.jsonl
 
+## NOTE: "json" and "jsonl" are very different!!
 
 ## Internals:
     Take name of jsonl file as arg.
@@ -33,7 +33,7 @@ Note: will only print lines actually matched from original jsonl file
     Take txt filenames from stdin.
     Read in text from txt file
     Open matching .json file, read in JSON object
-    Merge text as FIELD entry
+    Merge text as FIELD entry, into JSON object
     Find match of JSON.url with JSONL url entry.
     Merge the two in memory
     Write out the merged JSONL line
@@ -128,13 +128,8 @@ def main(jsonl_file):
 
         print(f"Processed: {txt_file}", file=sys.stderr)
 
-
+    
     ################################# 
-    print(f"Merging field {FIELD} from txt with json files", file=sys.stderr)
-    for line in sys.stdin:
-        txt_file = line.strip()
-        if txt_file:
-            merge_json_and_txt(txt_file)
 
 
 if __name__ == "__main__":
