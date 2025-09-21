@@ -22,7 +22,8 @@ def parse_args():
     p.add_argument("--scheduler",      type=str, default="constant", help="Default=constant")
     p.add_argument("--scheduler_at_epoch", action="store_true", 
                    help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
-    p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","py_lion","opt_lion", "d_lion"], default="adamw8")
+    p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","opt_lion","py_lion", "d_lion"], default="adamw8", 
+                   help="opt_lion is recommended over py_lion")
     p.add_argument("--num_cycles",     type=float, help="Typically only used with cosine decay")
     p.add_argument("--min_sigma",      type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
@@ -513,6 +514,20 @@ def main():
             lr_sched = SequentialLR(optim, [warmup, rex], milestones=[warmup_steps])
         else:
             lr_sched = rex
+
+    elif args.scheduler.lower() == "linear_with_min_lr":
+        base_lr  = args.learning_rate
+        floor_lr = base_lr * args.min_lr_ratio
+
+        lr_sched = get_scheduler(
+            name="polynomial",            # linear when power=1.0
+            optimizer=optimizer,
+            num_warmup_steps=warmup_steps,    # 0 if no warmup
+            num_training_steps=max_steps,
+            power=1.0,
+            lr_end=floor_lr
+        )
+
     else:
         lr_sched = get_scheduler(args.scheduler, **scheduler_args)
 
