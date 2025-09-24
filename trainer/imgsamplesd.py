@@ -57,7 +57,7 @@ pipe.enable_sequential_cpu_offload()
 prompt=args.prompt
 seed=args.seed
 
-generator = torch.Generator(device="cuda").manual_seed(seed)
+generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
 
 print(f"Trying render of '{prompt}' using seed {seed}...")
 images = pipe(prompt, num_inference_steps=args.steps, generator=generator).images

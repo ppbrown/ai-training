@@ -172,9 +172,10 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
     )
     pipe.safety_checker=None
     pipe.set_progress_bar_config(disable=True)
-
     pipe.enable_sequential_cpu_offload()
-    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    # Make sure that prompt order doesnt change effective seed
+    generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
 
     images = pipe(prompt, num_inference_steps=30, generator=generator).images
     for ndx, image in enumerate(images):
