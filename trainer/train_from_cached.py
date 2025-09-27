@@ -109,6 +109,7 @@ args = parse_args()
 # --------------------------------------------------------------------------- #
 
 import os, math, shutil
+from itertools import chain
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -394,10 +395,21 @@ def main():
                         num_workers=8, persistent_workers=True,
                         pin_memory=True, collate_fn=collate_fn,
                         prefetch_factor=4)
+        if len(dl)<1:
+            raise ValueError("Error: dataset invalid")
 
         dataloaders.append(dl)
-        # dl count already divided by mini batch
-        steps_per_epoch += len(dl) // accum 
+
+    shortest_dl_len = min(len(dl) for dl in dataloaders)
+    if len(dataloaders) > 1:
+        print("Will truncate all to shortest length:", shortest_dl_len * bs)
+        # Truncation is effectively done by use of zip, lower down.
+        # We dont actually change the objs here. But we DO use this to calculate
+        # steps_per_epoch, which is important
+
+    steps_per_epoch = shortest_dl_len * len(dataloaders)
+    # dl count already divided by mini batch
+    steps_per_epoch = steps_per_epoch // accum
 
     if args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
@@ -517,15 +529,14 @@ def main():
             lr_sched = rex
 
     elif args.scheduler.lower() == "linear_with_min_lr":
+        from transformers import get_polynomial_decay_schedule_with_warmup
         base_lr  = args.learning_rate
         floor_lr = base_lr * args.min_lr_ratio
 
-        lr_sched = get_scheduler(
-            name="polynomial",            # linear when power=1.0
-            optimizer=optimizer,
-            num_warmup_steps=warmup_steps,    # 0 if no warmup
+        lr_sched = get_polynomial_decay_schedule_with_warmup(
+            optimizer=optim,
+            num_warmup_steps=warmup_steps,
             num_training_steps=max_steps,
-            power=1.0,
             lr_end=floor_lr
         )
 
@@ -759,12 +770,13 @@ def main():
 
 
 
-
-        for dl in dataloaders:
-            for batch in dl:
-                if batch_count >= max_steps:
-                    break
-                train_micro_batch(unet)
+        # yes this will stop at end of shortest dataset.
+        # Every dataset will get equal value. I'm not messing around with
+        #  custom "balancing"
+        for batch in chain.from_iterable(zip(*dataloaders)):
+            if batch_count >= max_steps:
+                break
+            train_micro_batch(unet)
 
         pbar.close()
         if batch_count >= max_steps:
