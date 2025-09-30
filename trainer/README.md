@@ -12,14 +12,19 @@ the following components:
 * T5 xxl text encoder
 * SD 1.5 unet
 
-I'm training this in bf16 precision and 512x512 images, because with this setup,
+The script supports training in bf16 precision and 512x512 images, because with this setup,
 I can run a native batch size of 64 on my rtx 4090, and get
-1600 steps per hour. I can even just barely fit batch 64, accum 4
+1600 steps per hour. I can even just barely fit batch 64, accum 4 if I use pure square images.
+
+Alternatively it does quite well with full fp32 training. b24a10 is quite nice for that, as is b24a16.
+Presuming you have a LARGE dataset, that is.
 
 ## Assumptions
 
 The code is currently centered around SD1.5 training.
-See the "train_sd.sh" script for the vanilla version,
+Primary script to use is "train_from_cached.py"
+
+Wrappers for it are the "train_sd.sh" script for the vanilla version,
 or "train_t5.sh" for the fancier one.
 
 In theory the core loop could be modified to work with SDXL.
@@ -27,7 +32,8 @@ More work would be required to fit it for for any other model.
 
 Loosely speaking it uses the "diffusers" Pipeline methodology, at least in some places.
 
-The training script is a work in progress. Not guaranteed to work correctly at this point!
+The training script is a work in progress. 
+Unlike what I have said previously, I can finally say that it DOES work correctly now!
 
 ## Data prep
 
