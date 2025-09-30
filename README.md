@@ -1,4 +1,4 @@
-# ai-training
+# AI-training
 
 Tools for training certain AI models.
 
@@ -9,13 +9,13 @@ because I want to create a model with a currently unsupported architecture.
 None of the existing programs had all the features I wanted, so
 I wrote my own, instead of trying to mod one of those.
 
-# Subdirs
+## Subdirs
 
 The actual "train a model" scripts are under
 [trainer](/trainer/)
 
-but before you train a mode, you need a dataset to train it on.
-So there are some relevant scripts for that under
+But before you train a mode, you need a dataset to train it on.
+So there are some relevant scripts to help with that under
 [dataset_scripts](/dataset_scripts/)
 
 
@@ -27,7 +27,7 @@ The primary features I like about my own scripts are:
 
 * Easier-to-understand flow(for me, anyway) for the actual training
 
-* Full training config gets coped alongside the resulting model
+* Full training config gets copied alongside the resulting model
 
 
 # Drawbacks
