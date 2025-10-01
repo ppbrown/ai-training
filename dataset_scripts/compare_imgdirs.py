@@ -8,7 +8,7 @@ This makes it easier to check if current run is better or worse than previous on
 
 import sys, os, argparse
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QHBoxLayout, QMessageBox
+    QApplication, QWidget, QLabel, QHBoxLayout, QMessageBox, QGridLayout
 )
 from PySide6.QtGui import QPixmap, QKeyEvent
 from PySide6.QtCore import Qt
@@ -27,33 +27,52 @@ def find_images_recursive(folder):
     return image_files
 
 class ImageCompareViewer(QWidget):
-    def __init__(self, folder1, folder2):
+    def __init__(self, folder1, folder2, folder3=None, skip=0):
         super().__init__()
         self.setWindowTitle("Recursive Image Comparator")
         self.resize(1040, 520)
 
         self.folder1 = folder1
         self.folder2 = folder2
+        self.folder3 = folder3
 
         images1 = find_images_recursive(folder1)
         images2 = find_images_recursive(folder2)
+        if folder3:
+            self.folder3 = folder3
+            images3 = find_images_recursive(folder3)
+        else:
+            images3 = None
 
         # Match by relative path
-        common_keys = sorted(set(k for k, _ in images1) & set(k for k, _ in images2))
+        common_keys = set(k for k, _ in images1) & set(k for k, _ in images2)
+        if images3:
+            common_keys &= set(k for k, _ in images3)
+        common_keys = sorted(common_keys)
+
         self.pairs = [(dict(images1)[k], dict(images2)[k]) for k in common_keys]
         self.max_index = len(self.pairs)
-        self.index = 0
+        self.index = skip
 
-        self.label1 = QLabel("Folder 1")
-        self.label2 = QLabel("Folder 2")
-        self.label1.setAlignment(Qt.AlignCenter)
-        self.label2.setAlignment(Qt.AlignCenter)
-        self.label1.setScaledContents(True)
-        self.label2.setScaledContents(True)
+        if self.index >= self.max_index:
+           self.index = self.max_index - 1
 
-        layout = QHBoxLayout()
-        layout.addWidget(self.label1)
-        layout.addWidget(self.label2)
+        def makelabel(ndx: int):
+            label1 = QLabel(f"Folder {ndx}")
+            label1.setAlignment(Qt.AlignCenter)
+            label1.setScaledContents(True)
+            return label1
+
+        self.label1 = makelabel(1)
+        self.label2 = makelabel(2)
+        if folder3:
+            self.label3 = makelabel(3)
+
+        layout = QGridLayout()
+        layout.addWidget(self.label1, 0, 0)
+        layout.addWidget(self.label2, 0, 1)
+        if folder3:
+            layout.addWidget(self.label3, 1, 0)
         self.setLayout(layout)
 
         if not self.pairs:
@@ -77,7 +96,12 @@ class ImageCompareViewer(QWidget):
             img1, img2 = self.pairs[self.index]
             self.label1.setPixmap(prepare_pixmap(img1))
             self.label2.setPixmap(prepare_pixmap(img2))
-            basename = os.path.basename(self.pairs[self.index][0])
+            if self.folder3:
+                img3 = self.pairs[self.index]
+                self.label3.setPixmap(prepare_pixmap(img3))
+
+            #basename = os.path.basename(self.pairs[self.index][0])
+            basename = self.pairs[self.index][0].removeprefix(self.folder1)
             self.setWindowTitle(f"[{self.index+1}/{self.max_index}] {basename}")
         else:
             QMessageBox.warning(self, "Out of range", "No more images.")
@@ -98,14 +122,22 @@ def main():
     parser = argparse.ArgumentParser(description="Recursively compare image folders side-by-side.")
     parser.add_argument("folder1", help="First folder")
     parser.add_argument("folder2", help="Second folder")
+    parser.add_argument("folder3", nargs="?", help="Optional third folder")
+    parser.add_argument("--skip", type=int, default=0, help="Number of initial image matches to skip over")
     args = parser.parse_args()
 
     if not os.path.isdir(args.folder1) or not os.path.isdir(args.folder2):
         print("Error: One or both paths are not valid directories.")
         sys.exit(1)
+    print("", args.folder1, "\n", args.folder2,
+            f"\n{args.folder3}" if args.folder3 else "")
 
     app = QApplication(sys.argv)
-    viewer = ImageCompareViewer(args.folder1, args.folder2)
+    viewer = ImageCompareViewer(
+            args.folder1, 
+            args.folder2,
+            args.folder3 if args.folder3 else None,
+            args.skip)
     viewer.show()
     sys.exit(app.exec())
 
