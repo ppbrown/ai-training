@@ -39,7 +39,6 @@ class ImageCompareViewer(QWidget):
         images1 = find_images_recursive(folder1)
         images2 = find_images_recursive(folder2)
         if folder3:
-            self.folder3 = folder3
             images3 = find_images_recursive(folder3)
         else:
             images3 = None
@@ -50,10 +49,12 @@ class ImageCompareViewer(QWidget):
             common_keys &= set(k for k, _ in images3)
         common_keys = sorted(common_keys)
 
-        self.pairs = [(dict(images1)[k], dict(images2)[k]) for k in common_keys]
+        self.pairs = [(dict(images1)[k], 
+                       dict(images2)[k], 
+                       dict(images3)[k] if images3 else None) for k in common_keys]
+
         self.max_index = len(self.pairs)
         self.index = skip
-
         if self.index >= self.max_index:
            self.index = self.max_index - 1
 
@@ -91,13 +92,13 @@ class ImageCompareViewer(QWidget):
             x = max(0, (pixmap.width() - 512) // 2)
             y = max(0, (pixmap.height() - 512) // 2)
             return pixmap.copy(x, y, 512, 512)
+        ######
 
         if 0 <= self.index < self.max_index:
-            img1, img2 = self.pairs[self.index]
+            img1, img2, img3 = self.pairs[self.index]
             self.label1.setPixmap(prepare_pixmap(img1))
             self.label2.setPixmap(prepare_pixmap(img2))
-            if self.folder3:
-                img3 = self.pairs[self.index]
+            if img3:
                 self.label3.setPixmap(prepare_pixmap(img3))
 
             #basename = os.path.basename(self.pairs[self.index][0])
