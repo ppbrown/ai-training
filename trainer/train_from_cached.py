@@ -20,6 +20,8 @@ def parse_args():
     p.add_argument("--train_data_dir",  nargs="+", required=True, action="append",
                    help="Directory tree(s) containing *.jpg + *.txt.\nCan use more than once, but make sure same resolution for each")
     p.add_argument("--scheduler",      type=str, default="constant", help="Default=constant")
+    p.add_argument("--scale_loss_with_accum", action="store_true", 
+                   help="When accum >1, scale each microbatch loss /accum")
     p.add_argument("--scheduler_at_epoch", action="store_true", 
                    help="Only consult scheduler at epoch boundaries. Useful if less than 15 epochs")
     p.add_argument("--optimizer",      type=str, choices=["adamw","adamw8","opt_lion","py_lion", "d_lion"], default="adamw8", 
@@ -648,6 +650,9 @@ def main():
                 loss = (weights * mse).mean()
             else:
                 loss = raw_mse_loss
+
+            if args.scale_loss_with_accum:
+                loss = loss / args.gradient_accum
 
             accelerator.wait_for_everyone()
             accelerator.backward(loss)
