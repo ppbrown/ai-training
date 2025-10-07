@@ -659,16 +659,7 @@ def main():
 
         # -----logging & ckp save  ----------------------------------------- #
         if accelerator.is_main_process:
-            qk_grad_sum = sum(
-                    p.grad.abs().mean().item()
-                    for n,p in unet.named_parameters()
-                    if p.grad is not None and (".to_q" in n or ".to_k" in n))
-            total_norm = 0.0
-            for p in unet.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
+
             for n, p in unet.named_parameters():
                 if p.grad is not None and torch.isnan(p.grad).any():
                     print(f"NaN grad: {n}")
@@ -677,6 +668,10 @@ def main():
             if args.optimizer.startswith("d_"):
                 current_lr *= float(optim.param_groups[0]["d"])
 
+            if tb_writer is not None:
+                # overly complicated if gr accum==1, but nice to skip an "if"
+                accum_loss += loss.item()
+                accum_mse += raw_mse_loss.item()
 
 
             pbar.set_description_str((
@@ -685,29 +680,41 @@ def main():
                     ))
             pbar.set_postfix_str((f" l: {loss.item():.3f}"
                                   f" raw: {raw_mse_loss.item():.3f}"
-                                  f" qk: {qk_grad_sum:.1e}"
-                                  f" gr: {total_norm:.1e}"
-                                  #"lr": f"{current_lr:.1e}",
+                                  f" lr: {current_lr:.1e}"
+                                  #f" qk: {qk_grad_sum:.1e}"
+                                  #f" gr: {total_norm:.1e}"
                                   ))
 
+
+        # Accelerate will make sure this only gets called on full-batch boundaries
+        if accelerator.sync_gradients:
+            accum_qk = sum(
+                    p.grad.abs().mean().item()
+                    for n,p in unet.named_parameters()
+                    if p.grad is not None and (".to_q" in n or ".to_k" in n))
+            total_norm = 0.0
+            for p in unet.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            accum_norm = total_norm ** 0.5
+
             if tb_writer is not None:
-                # overly complicated if gr accum==1, but nice to skip an "if"
-                accum_loss += loss.item()
-                accum_mse += raw_mse_loss.item()
-                accum_qk += qk_grad_sum
-                accum_norm += total_norm
-                if global_step % args.gradient_accum == 0:
+                try:
                     tb_writer.add_scalar("train/learning_rate", current_lr, batch_count)
                     if args.use_snr:
                         tb_writer.add_scalar("train/loss_snr", accum_loss / args.gradient_accum, batch_count)
                     tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
-                    tb_writer.add_scalar("train/qk_grads_av", accum_qk / args.gradient_accum, batch_count)
-                    tb_writer.add_scalar("train/grad_norm", accum_norm / args.gradient_accum, batch_count)
+                    tb_writer.add_scalar("train/qk_grads_av", accum_qk, batch_count)
+                    tb_writer.add_scalar("train/grad_norm", accum_norm, batch_count)
                     accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
                     tb_writer.add_scalar("train/epoch_progress", epoch_count / steps_per_epoch,  batch_count)
+                except Exception as e:
+                    print("Error logging to tensorboard")
 
-        # Accelerate will make sure this only gets called on full-batch boundaries
-        if accelerator.sync_gradients and (args.gradient_clip is not None and args.gradient_clip > 0):
+
+
+            if args.gradient_clip is not None and args.gradient_clip > 0:
                 accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
 
 
