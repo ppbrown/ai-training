@@ -580,6 +580,7 @@ def main():
             f.write('\n'.join(latent_paths) + '\n')
             f.close()
         print("Wrote",len(latent_paths),"loglines to",savefile)
+        latent_paths = []
 
     def train_micro_batch(unet):
         nonlocal batch_count, global_step, accum_loss, accum_mse, accum_qk, accum_norm, epoch_count
