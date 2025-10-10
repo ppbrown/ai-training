@@ -54,6 +54,7 @@ def parse_args():
     p.add_argument("--max_steps",      default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
     p.add_argument("--save_steps",     type=int, help="Measured in effective batchsize(b * a)")
+    p.add_argument("--save_start",     type=int, help="Dont start saving until past this step")
     p.add_argument("--save_on_epoch",  action="store_true")
     p.add_argument("--noise_gamma",    type=float, default=5.0)
     p.add_argument("--betas",  type=float, nargs=2, metavar=("BETA1","BETA2"),
@@ -119,15 +120,6 @@ import torch
 import safetensors.torch as st
 from torch.utils.data import Dataset, DataLoader
 
-# --------------------------------------------------------------------------- #
-print("HAND HACKING FLOWMATCH MODULE")
-from diffusers import FlowMatchEulerDiscreteScheduler
-def scale_model_input(self, sample, timestep):
-    return sample
-
-FlowMatchEulerDiscreteScheduler.scale_model_input = scale_model_input
-# --------------------------------------------------------------------------- #
-    
 
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from diffusers import DiffusionPipeline, UNet2DConditionModel
@@ -327,6 +319,8 @@ def main():
         unfreeze_all_attention(pipe.unet)
     # ------------------------------------------ #
 
+    if args.save_start:
+        print("save_start limit set to",args.save_start)
     if args.cpu_offload:
         print("Enabling cpu offload")
         pipe.enable_model_cpu_offload()
@@ -550,6 +544,7 @@ def main():
     global_step = 0 
     batch_count = 0
     accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
+    latent_paths = []
 
     run_name = os.path.basename(args.output_dir)
     tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
@@ -580,14 +575,22 @@ def main():
                 tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
                 shutil.copy(args.copy_config, args.output_dir)
 
+        savefile = os.path.join(ckpt_dir, "latent_paths")
+        with open(savefile, "w") as f:
+            f.write('\n'.join(latent_paths) + '\n')
+            f.close()
+        print("Wrote",len(latent_paths),"loglines to",savefile)
+
     def train_micro_batch(unet):
         nonlocal batch_count, global_step, accum_loss, accum_mse, accum_qk, accum_norm, epoch_count
+        nonlocal latent_paths
 
         with accelerator.accumulate(unet):
             # --- Load latents & prompt embeddings from cache ---
             latents = []
             for cache_file in batch["img_cache"]:
                 latent = st.load_file(cache_file)["latent"]
+                latent_paths.append(cache_file)
                 latents.append(latent)
             latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
 
@@ -744,8 +747,9 @@ def main():
                     print("warning: got exception", e)
 
             elif args.save_steps and (batch_count % args.save_steps == 0):
-                print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
-                checkpointandsave()
+                if batch_count > int(args.save_start or 0):
+                    print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
+                    checkpointandsave()
 
 
     ################## end of def train_micro_batch():
