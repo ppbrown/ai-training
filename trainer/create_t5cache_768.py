@@ -14,6 +14,8 @@ Key points:
 • Default model: /BLUE/t5-train/models/t5-sd  (change via --model)
 """
 
+SUFFIX=".txtqs"
+
 import argparse
 import concurrent.futures
 import gc
@@ -38,7 +40,7 @@ def cli():
     p.add_argument(
         "--data_root",
         required=True,
-        help="Directory tree that contains *.txt caption files",
+        help=f"Directory tree that contains {SUFFIX} caption files",
     )
     p.add_argument(
         "--model",
@@ -130,12 +132,12 @@ def main():
 
     # ---------- gather caption files -------------------------------------- #
     root = Path(args.data_root).expanduser().resolve()
-    txt_files = sorted(root.rglob("*.txt"))
+    txt_files = sorted(root.rglob(f"*{SUFFIX}"))
 
-    print(f"Parsing {root} while skipping existing cache files...")
+    print(f"Parsing {root} for {SUFFIX} while skipping existing cache files...")
 
     def needs_cache(p: Path) -> bool:
-        return args.overwrite or not (p.with_suffix(p.suffix + CACHE_POSTFIX)).exists()
+        return args.overwrite or not (p.with_suffix(".txt" + CACHE_POSTFIX)).exists()
 
     txt_files = [p for p in txt_files if needs_cache(p)]
     total = len(txt_files)
@@ -156,10 +158,11 @@ def main():
                 return True
             with gpu_sem:  # ensure limited concurrent GPU work
                 vec = encode_gpu_single(caption, pipe, args.dtype)  # [T, D] bf16 on CPU
-            out = path.with_suffix(path.suffix + CACHE_POSTFIX)
+            out = path.with_suffix(".txt" + CACHE_POSTFIX)
             st.save_file({"emb": vec}, out)
             return True
         except Exception as e:
+            print(f"[ERR] {path}: {type(e).__name__}: {e}", flush=True)
             return e
 
     errors = 0
