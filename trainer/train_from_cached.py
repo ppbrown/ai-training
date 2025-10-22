@@ -550,6 +550,7 @@ def main():
     tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
 
     def checkpointandsave():
+        nonlocal latent_paths
         if global_step % args.gradient_accum != 0:
             print("INTERNAL ERROR: checkpointandsave() not called on clean step")
             return
