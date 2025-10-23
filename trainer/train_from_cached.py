@@ -3,7 +3,6 @@
 # train_with_caching.py
 
 
-
 # --------------------------------------------------------------------------- #
 # 1. CLI                                                                      #
 # --------------------------------------------------------------------------- #
@@ -32,6 +31,8 @@ def parse_args():
     p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
     p.add_argument("--batch_size",     type=int, default=4)
+    p.add_argument("--force_toklen",   type=int, 
+                   help="Force token length to a single value, like 256. Use for T5 cache")
     p.add_argument("--gradient_accum", type=int, default=1, help="Default=1")
     p.add_argument('--gradient_checkpointing', action='store_true',
                    help="Enable grad checkpointing in unet")
@@ -69,6 +70,8 @@ def parse_args():
                    help="Only train reset layers")
     p.add_argument("--reinit_crossattn", action="store_true",
                    help="Attempt to reset cross attention weights for text realign")
+    p.add_argument("--reinit_crossattnout", action="store_true",
+                   help="Attempt to reset just the 'out' cross attention weights")
     p.add_argument("--reinit_attention", action="store_true",
                    help="Attempt to reset ALL attention weights for text realign")
     p.add_argument("--reinit_qk", action="store_true",
@@ -126,6 +129,7 @@ from diffusers import DiffusionPipeline, UNet2DConditionModel
 from diffusers import DDPMScheduler, PNDMScheduler
 from diffusers.models.attention import Attention as CrossAttention
 from diffusers.training_utils import compute_snr
+
 
 # diffusers optimizers dont have a min_lr arg,
 # so dont use that scheduler
@@ -235,6 +239,7 @@ def main():
         print(e)
         exit(0)
 
+
     # -- unet trainable selection -- #
     if args.targetted_training:
         print("Limiting Unet training to targetted area(s)")
@@ -266,6 +271,10 @@ def main():
         print("Attempting to reset Cross Attn layers of Unet")
         from reinit import reinit_cross_attention
         reinit_cross_attention(pipe.unet)
+    elif args.reinit_crossattnout:
+        print("Attempting to reset Cross Attn OUT layers of Unet")
+        from reinit import reinit_cross_attention_outproj
+        reinit_cross_attention_outproj(pipe.unet)
     elif args.reinit_attention:
         print("Attempting to reset attention layers of Unet")
         from reinit import reinit_all_attention
@@ -610,7 +619,24 @@ def main():
                         exit(0)
                 emb = emb.to(device, dtype=compute_dtype)
                 embeds.append(emb)
-            prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
+
+            if args.force_toklen:
+                # Text embeddings have to all be same length otherwise we cant batch train.
+                # zero-pad where needed. Truncate where needed.
+                MAX_TOK = args.force_toklen
+                D = embeds[0].size(1)
+                fixed = []
+                for e in embeds:
+                    T = e.size(0)
+                    if T >= MAX_TOK:
+                        fixed.append(e[:MAX_TOK])
+                    else:
+                        pad = torch.zeros((MAX_TOK - T, D), dtype=e.dtype, device=e.device)
+                        fixed.append(torch.cat([e, pad], dim=0))
+                prompt_emb = torch.stack(fixed, dim=0).to(device, dtype=compute_dtype) # [B, MAX_TOK, D]
+            else:
+                # Take easy path, if using CLIP cache or something where length is already forced
+                prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
 
             # --- Add noise ---
 
