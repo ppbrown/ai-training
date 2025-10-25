@@ -30,33 +30,61 @@ from tqdm import tqdm
 # This is a hidden dependancy. Put this to force cleaner errormsg
 import sentencepiece  
 
-SUFFIX=".txtqs"
-CACHE_POSTFIX = "_t5cache"  # keep for training backend compatibility
+TXT_SUFFIX=".txtqs"
+CACHE_SUFFIX = ".txt_t5cache"  # keep for training backend compatibility
 
 
 # --------------------------------------------------------------------------- #
 def cli():
     p = argparse.ArgumentParser()
-    p.add_argument("--data_root", required=True,
-        help=f"Directory tree that contains {SUFFIX} caption files",
+    p.add_argument(
+        "--data_root",
+        required=True,
+        help=f"Directory tree that contains {TXT_SUFFIX} caption files",
     )
-    p.add_argument("--model", default="/BLUE/t5-train/models/t5-sd",
+    p.add_argument(
+        "--txt_suffix",
+        default=TXT_SUFFIX,
+        help=f"Default value={TXT_SUFFIX}",
+    )
+    p.add_argument(
+        "--cache_suffix",
+        default=CACHE_SUFFIX,
+        help=f"Default value={CACHE_SUFFIX}",
+    )
+    p.add_argument(
+        "--model",
+        default="/BLUE/t5-train/models/t5-sd",
         help="HF repo / local dir of your pipeline(or take default)",
     )
-    p.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16",
+    p.add_argument(
+        "--dtype",
+        choices=["bf16", "fp16"],
+        default="bf16",
         help="GPU compute precision",
     )
     # Kept for backward compatibility only; unused in single-item encodes
-    p.add_argument("--batch_size", type=int, default=16,
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=16,
         help="(Deprecated/unused) Previously batched encodes. Ignored.",
     )
-    p.add_argument("--overwrite", action="store_true",
-        help=f"Re-encode even if *{CACHE_POSTFIX} already exists",
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=f"Re-encode even if *{CACHE_SUFFIX} already exists",
     )
-    p.add_argument("--workers", type=int, default=min(8, (os.cpu_count() or 4)),
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=min(8, (os.cpu_count() or 4)),
         help="CPU threads for file I/O and saving. Default=min(8, CPU cores)",
     )
-    p.add_argument("--gpu_concurrency", type=int, default=1,
+    p.add_argument(
+        "--gpu_concurrency",
+        type=int,
+        default=1,
         help="Max concurrent GPU encodes. 1 is safest on a single 24GB GPU.",
     )
     return p.parse_args()
@@ -77,8 +105,11 @@ def encode_gpu_single(caption: str, pipe, precision: str) -> torch.Tensor:
             do_classifier_free_guidance=False,
             truncation=True,
             padding="do_not_pad",  # tight; no extra tokens produced
-        )  # (1, T, D) on GPU
-    return emb.squeeze(0).to(torch.bfloat16, copy=False).cpu()  # (T, D) on CPU
+        )
+
+    # encode_prompt() returns (pos_emb, neg_emb), but we only use pos
+    # throw away neg
+    return emb[0].squeeze(0).to(torch.bfloat16, copy=False).cpu()  # (T, D) on CPU
 
 
 # --------------------------------------------------------------------------- #
@@ -91,9 +122,6 @@ def main():
         args.model,
         custom_pipeline=args.model,
         torch_dtype=torch.float16 if args.dtype == "fp16" else torch.bfloat16,
-    )
-    assert pipe.__class__.__name__ == "StableDiffusionT5Pipeline", (
-        f"Loaded pipeline is {pipe.__class__.__name__}, expected StableDiffusionT5Pipeline"
     )
 
     # Optional info; skip if projection absent in your custom pipeline
@@ -117,12 +145,12 @@ def main():
 
     # ---------- gather caption files -------------------------------------- #
     root = Path(args.data_root).expanduser().resolve()
-    txt_files = sorted(root.rglob(f"*{SUFFIX}"))
+    txt_files = sorted(root.rglob(f"*{args.txt_suffix}"))
 
-    print(f"Parsing {root} for {SUFFIX} while skipping existing cache files...")
+    print(f"Parsing {root} for {args.txt_suffix} while skipping existing cache files...")
 
     def needs_cache(p: Path) -> bool:
-        return args.overwrite or not (p.with_suffix(".txt" + CACHE_POSTFIX)).exists()
+        return args.overwrite or not (p.with_suffix(args.cache_suffix)).exists()
 
     txt_files = [p for p in txt_files if needs_cache(p)]
     total = len(txt_files)
@@ -143,7 +171,7 @@ def main():
                 return True
             with gpu_sem:  # ensure limited concurrent GPU work
                 vec = encode_gpu_single(caption, pipe, args.dtype)  # [T, D] bf16 on CPU
-            out = path.with_suffix(".txt" + CACHE_POSTFIX)
+            out = path.with_suffix(args.cache_suffix)
             st.save_file({"emb": vec}, out)
             return True
         except Exception as e:
