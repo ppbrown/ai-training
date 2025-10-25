@@ -14,7 +14,6 @@ Key points:
 • Default model: /BLUE/t5-train/models/t5-sd  (change via --model)
 """
 
-SUFFIX=".txtqs"
 
 import argparse
 import concurrent.futures
@@ -31,50 +30,33 @@ from tqdm import tqdm
 # This is a hidden dependancy. Put this to force cleaner errormsg
 import sentencepiece  
 
+SUFFIX=".txtqs"
 CACHE_POSTFIX = "_t5cache"  # keep for training backend compatibility
 
 
 # --------------------------------------------------------------------------- #
 def cli():
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--data_root",
-        required=True,
+    p.add_argument("--data_root", required=True,
         help=f"Directory tree that contains {SUFFIX} caption files",
     )
-    p.add_argument(
-        "--model",
-        default="/BLUE/t5-train/models/t5-sd",
+    p.add_argument("--model", default="/BLUE/t5-train/models/t5-sd",
         help="HF repo / local dir of your pipeline(or take default)",
     )
-    p.add_argument(
-        "--dtype",
-        choices=["bf16", "fp16"],
-        default="bf16",
+    p.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16",
         help="GPU compute precision",
     )
     # Kept for backward compatibility only; unused in single-item encodes
-    p.add_argument(
-        "--batch_size",
-        type=int,
-        default=16,
+    p.add_argument("--batch_size", type=int, default=16,
         help="(Deprecated/unused) Previously batched encodes. Ignored.",
     )
-    p.add_argument(
-        "--overwrite",
-        action="store_true",
+    p.add_argument("--overwrite", action="store_true",
         help=f"Re-encode even if *{CACHE_POSTFIX} already exists",
     )
-    p.add_argument(
-        "--workers",
-        type=int,
-        default=min(8, (os.cpu_count() or 4)),
+    p.add_argument("--workers", type=int, default=min(8, (os.cpu_count() or 4)),
         help="CPU threads for file I/O and saving. Default=min(8, CPU cores)",
     )
-    p.add_argument(
-        "--gpu_concurrency",
-        type=int,
-        default=1,
+    p.add_argument("--gpu_concurrency", type=int, default=1,
         help="Max concurrent GPU encodes. 1 is safest on a single 24GB GPU.",
     )
     return p.parse_args()
