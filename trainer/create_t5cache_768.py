@@ -92,6 +92,9 @@ def main():
         custom_pipeline=args.model,
         torch_dtype=torch.float16 if args.dtype == "fp16" else torch.bfloat16,
     )
+    assert pipe.__class__.__name__ == "StableDiffusionT5Pipeline", (
+        f"Loaded pipeline is {pipe.__class__.__name__}, expected StableDiffusionT5Pipeline"
+    )
 
     # Optional info; skip if projection absent in your custom pipeline
     if hasattr(pipe, "t5_projection") and hasattr(pipe.t5_projection, "config"):
