@@ -812,8 +812,6 @@ def main():
 
         # "batch" is actually micro-batch
 
-
-
         # yes this will stop at end of shortest dataset.
         # Every dataset will get equal value. I'm not messing around with
         #  custom "balancing"
@@ -836,7 +834,6 @@ def main():
             print(f"finished:model saved to {args.output_dir}")
         else:
             checkpointandsave()
-
 
 if __name__ == "__main__":
     try:
