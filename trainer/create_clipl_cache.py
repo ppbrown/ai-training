@@ -5,9 +5,6 @@
 import argparse, gc
 from pathlib import Path
 
-import torch, safetensors.torch as st
-from diffusers import StableDiffusionPipeline
-from tqdm import tqdm
 
 CACHE_POSTFIX = "_clipl"  # distinguish from your T5 cache
 
@@ -24,6 +21,14 @@ def cli():
                    help=f"re-encode even if *{CACHE_POSTFIX} already exists")
     return p.parse_args()
 
+#faster usage return
+args = cli()
+
+import torch, safetensors.torch as st
+from diffusers import StableDiffusionPipeline
+from tqdm import tqdm
+
+
 @torch.inference_mode()
 def encode_gpu(captions, pipe, precision):
     cast = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -37,7 +42,6 @@ def encode_gpu(captions, pipe, precision):
     return emb[0].to(torch.bfloat16, copy=False).cpu()
 
 def main():
-    args = cli()
     torch.backends.cuda.matmul.allow_tf32 = True
 
     print("Loading", args.model)

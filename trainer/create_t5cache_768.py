@@ -16,19 +16,8 @@ Key points:
 
 
 import argparse
-import concurrent.futures
-import gc
+
 import os
-import threading
-from pathlib import Path
-
-import safetensors.torch as st
-import torch
-from diffusers import DiffusionPipeline
-from tqdm import tqdm
-
-# This is a hidden dependancy. Put this to force cleaner errormsg
-import sentencepiece  
 
 TXT_SUFFIX=".txtqs"
 CACHE_SUFFIX = ".txt_t5cache"  # keep for training backend compatibility
@@ -89,6 +78,20 @@ def cli():
     )
     return p.parse_args()
 
+args = cli()
+
+import gc
+import threading
+from pathlib import Path
+import concurrent.futures
+import safetensors.torch as st
+import torch
+from diffusers import DiffusionPipeline
+from tqdm import tqdm
+
+# This is a hidden dependancy. Put this to force cleaner errormsg
+import sentencepiece  
+
 
 # --------------------------------------------------------------------------- #
 @torch.inference_mode()
@@ -114,7 +117,6 @@ def encode_gpu_single(caption: str, pipe, precision: str) -> torch.Tensor:
 
 # --------------------------------------------------------------------------- #
 def main():
-    args = cli()
     torch.backends.cuda.matmul.allow_tf32 = True
 
     print("Loading", args.model)
