@@ -105,7 +105,26 @@ def reinit_cross_attention(unet, *, method: str = "xavier", sigma: float = 0.1) 
                         _add_noise(proj, sigma)
                     affected += proj.weight.numel()
 
-    print(f"[reinit_attention_all] updated {affected/1e6:.2f} M params in q/k/v/out projections")
+    print(f"[reinit_crossattention] updated {affected/1e6:.2f} M params in q/k/v/out projections")
+
+
+# Similar to reinit_crossattention but more targetted
+#  (attn2.to_out[0])
+def reinit_cross_attention_outproj(model):
+    """
+    SD1.5-only: zero ALL cross-attention output projections:
+      '*.attn2.to_out.*.{weight,bias}'
+    Call once on a fresh run (NOT when resuming).
+    """
+    affected = 0
+    hits_w = hits_b = 0
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if ".attn2.to_out." in name and (name.endswith(".weight") or name.endswith(".bias")):
+                nn.init.zeros_(p)
+                affected += p.numel()
+    print(f"[reinit_cross_attention_outproj] zeroed {affected/1e6:.2f} M params ")
+
 
 
 # I think "cross attention" is specifically for text emb mapping.
