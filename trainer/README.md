@@ -19,6 +19,16 @@ I can run a native batch size of 64 on my rtx 4090, and get
 Alternatively it does quite well with full fp32 training. b24a10 is quite nice for that, as is b24a16.
 Presuming you have a LARGE dataset, that is.
 
+## Overview of use
+
+Generally speaking, the workflow is:
+
+1. Data Prep
+2. Cache generation
+3. Training
+
+Full details of these steps are spelled out below
+
 ## Assumptions
 
 The code is currently centered around SD1.5 training.
