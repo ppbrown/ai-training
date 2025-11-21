@@ -494,6 +494,9 @@ def main():
         print("Wrote",len(latent_paths),"loglines to",savefile)
         latent_paths = []
 
+    #######################################################
+    #    Core training code. Very Long!!                  #
+    #######################################################
     def train_micro_batch(unet):
         nonlocal batch_count, global_step, accum_loss, accum_mse, accum_qk, accum_norm, epoch_count
         nonlocal latent_paths
@@ -650,7 +653,6 @@ def main():
             if args.gradient_clip is not None and args.gradient_clip > 0:
                 accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
 
-
         global_step += 1
         # We have to take into account gradient accumilation!!
         # This is one reason it has to default to "1", not "0"
@@ -681,8 +683,9 @@ def main():
                     print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
                     checkpointandsave()
 
-
-    ################## end of def train_micro_batch():
+    ###################################################
+    #     end of def train_micro_batch()
+    ###################################################
 
 
 
@@ -713,7 +716,6 @@ def main():
         epoch_count =  0
 
         # "batch" is actually micro-batch
-
         # yes this will stop at end of shortest dataset.
         # Every dataset will get equal value. I'm not messing around with
         #  custom "balancing"
