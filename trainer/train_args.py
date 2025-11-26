@@ -62,6 +62,8 @@ def parse_args():
                    help="Use Min SNR noise adjustments")
     p.add_argument( "--gradient_clip", type=float, default=1.0,
                         help="Max global grad norm. Set <=0 to disable gradient clipping.")
+    p.add_argument( "--gradient_topk", type=float,
+                        help="Optional gradient sparsification.  0.0 < topk < 1.0.")
 
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")

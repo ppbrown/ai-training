@@ -452,6 +452,9 @@ def main():
 
     lr_sched = accelerator.prepare(lr_sched)
 
+    if args.gradient_topk:
+        from grad_topk import apply_global_topk_gradients
+
     global_step = 0 
     batch_count = 0
     accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
@@ -592,6 +595,8 @@ def main():
 
             accelerator.wait_for_everyone()
             accelerator.backward(loss)
+            if args.gradient_topk:
+                apply_global_topk_gradients(unet, keep_frac=args.gradient_topk)
 
         # -----logging & ckp save  ----------------------------------------- #
         if accelerator.is_main_process:
