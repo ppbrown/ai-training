@@ -309,13 +309,17 @@ def main():
 
     shortest_dl_len = min(len(dl) for dl in dataloaders)
     if len(dataloaders) > 1:
-        print("Will truncate all to shortest length:", shortest_dl_len * bs)
-        # Truncation is effectively done by use of zip, lower down.
-        # We dont actually change the objs here. But we DO use this to calculate
-        # steps_per_epoch, which is important
+        print("Common shortest effective length:", shortest_dl_len * bs)
+        # Our use of zip lower down, effectively truncates them all to the same length,
+        # PER RUN.
+        # We dont actually change the length here. But we DO use this to calculate
+        # steps_per_epoch, which is important.
+        # Note that the longer datasets will use DIFFERENT subsets of themselves 
+        # over each epoch!!
 
     steps_per_epoch = shortest_dl_len * len(dataloaders)
-    # dl count already divided by mini batch
+    # dl count already divided by micro batch size.
+    # So now calculate EBS steps
     steps_per_epoch = steps_per_epoch // accum
 
     if args.max_steps and args.max_steps.endswith("e"):
