@@ -238,6 +238,9 @@ def main():
     else:
         pipe.to(device)
 
+    if args.gradient_topk:
+        print("Gradient sparsification(gradient_topk) set to", args.gradient_topk)
+
     if args.gradient_checkpointing:
         print("Enabling gradient checkpointing in UNet")
         pipe.unet.enable_gradient_checkpointing()
@@ -457,7 +460,7 @@ def main():
     lr_sched = accelerator.prepare(lr_sched)
 
     if args.gradient_topk:
-        from grad_topk import apply_global_topk_gradients
+        from train_grad_topk import apply_global_topk_gradients
 
     global_step = 0 
     batch_count = 0
