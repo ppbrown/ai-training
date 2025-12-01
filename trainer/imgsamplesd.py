@@ -7,6 +7,7 @@ def argproc():
     p = argparse.ArgumentParser()
     p.add_argument("--model", type=str, required=True)
     p.add_argument("--seed",  type=int, default=90)
+    p.add_argument("--inc_seed",  action="store_true")
     p.add_argument("--steps",  type=int, default=30)
     p.add_argument("--vae_scaling",  type=float)
     p.add_argument("--prompt", nargs="+", type=str,
@@ -25,12 +26,6 @@ from PIL import Image, PngImagePlugin
 
 MODEL = args.model
 
-print("HAND HACKING FLOWMATCH MODULE")
-from diffusers import FlowMatchEulerDiscreteScheduler
-def scale_model_input(self, sample, timestep):
-    return sample
-FlowMatchEulerDiscreteScheduler.scale_model_input = scale_model_input
-
 print(f"Loading from {MODEL}")
 if MODEL.endswith(".safetensors") or MODEL.endswith(".st"):
     raise ValueError("Cannot acccept single-file models. "
@@ -39,7 +34,7 @@ else:
     pipe = DiffusionPipeline.from_pretrained(
         MODEL, use_safetensors=True,
         safety_checker=None, requires_safety_checker=False,
-        torch_dtype=torch.bfloat16,
+        #torch_dtype=torch.bfloat16,
     )
 
 if args.vae_scaling:
@@ -57,7 +52,11 @@ pipe.enable_sequential_cpu_offload()
 prompt=args.prompt
 seed=args.seed
 
-generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
+if args.inc_seed:
+    # Allow batch jobs to auto-increment the random seed
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+else:
+    generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
 
 print(f"Trying render of '{prompt}' using seed {seed}...")
 images = pipe(prompt, num_inference_steps=args.steps, generator=generator).images
