@@ -19,8 +19,8 @@ device = "cpu"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", help="Diffusers model directory or repo (must have VAE)",
-                    default="/BLUE/t5-train/models/sd-base")
-#                    default="/BLUE/t5-train/models/sdxl-orig")
+#                    default="/BLUE/t5-train/models/sd-base")
+                    default="/BLUE/t5-train/models/sdxl-orig")
 parser.add_argument("--file", required=True, help="Path to a vae cache file")
 parser.add_argument("--custom", action="store_true",help="Look for custom pipeline in the model")
 args = parser.parse_args()
@@ -38,7 +38,7 @@ vae_model = pipe.vae.to(device).eval()
 
 with torch.no_grad():
     cached = st.load_file(args.file)["latent"].to(device)
-    #print(cached.shape)
+    print(cached.shape)
     decoded_image = vae_model.decode(cached.unsqueeze(0)).sample
 
 decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)  # Undo normalization
