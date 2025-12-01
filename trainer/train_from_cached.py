@@ -9,7 +9,7 @@
 import argparse
 
 from train_args import parse_args
-
+from train_multiloader import InfiniteLoader
 
 # Put this super-early, so that usage message procs fast
 args = parse_args()
@@ -52,7 +52,7 @@ torch.backends.cudnn.benchmark = True
 # 2. Utils                                                                    #
 # --------------------------------------------------------------------------- #
 
-from caption_dataset import CaptionImgDataset
+from train_captiondata import CaptionImgDataset
 
 def collate_fn(examples):
     return {
@@ -288,9 +288,12 @@ def main():
     # ----- load data ------------------------------------------------------------ #
     bs = args.batch_size ; accum = args.gradient_accum
     effective_batch_size = bs * accum
-    dataloaders = []; steps_per_epoch = 0
+    dataloaders = []
+    micro_steps_per_epoch = 0 # "micro" means "size directly run on gpu"
+    ebs_steps_per_epoch = 0   # Effective-batch_size
 
     for dirs in args.train_data_dir:
+        # remember, dirs can contain more than one dirname
         ds = CaptionImgDataset(dirs, 
                                batch_size=bs,
                                txtcache_suffix=args.txtcache_suffix,
@@ -298,10 +301,11 @@ def main():
                                gradient_accum=accum
                                )
 
-        # Yes keep this using microbatch not effective batch
-        # drop_last=True not needed: ds should have self-truncated
+        # Yes keep this using microbatch not effective batch size
+        # If you want to be fancy, maybe aim for accum = number of dataloaders
         dl = DataLoader(ds, batch_size=bs, 
                         shuffle=True,
+                        drop_last=True,
                         num_workers=8, persistent_workers=True,
                         pin_memory=True, collate_fn=collate_fn,
                         prefetch_factor=4)
@@ -309,30 +313,22 @@ def main():
             raise ValueError("Error: dataset invalid")
 
         dataloaders.append(dl)
-
-    shortest_dl_len = min(len(dl) for dl in dataloaders)
-    if len(dataloaders) > 1:
-        print("Common shortest effective length:", shortest_dl_len * bs)
-        # Our use of zip lower down, effectively truncates them all to the same length,
-        # PER RUN.
-        # We dont actually change the length here. But we DO use this to calculate
-        # steps_per_epoch, which is important.
-        # Note that the longer datasets will use DIFFERENT subsets of themselves 
-        # over each epoch!!
-
-    steps_per_epoch = shortest_dl_len * len(dataloaders)
+    mix_loader = InfiniteLoader(*dataloaders)
+    
+    shortest_dl_len = mix_loader.get_shortest_len()
+    micro_steps_per_epoch = shortest_dl_len * len(dataloaders)
     # dl count already divided by micro batch size.
     # So now calculate EBS steps
-    steps_per_epoch = steps_per_epoch // accum
+    ebs_steps_per_epoch = micro_steps_per_epoch // accum
 
     if args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
-        max_steps = max_steps * steps_per_epoch
+        max_steps = max_steps * ebs_steps_per_epoch
     else:
         max_steps = int(args.max_steps)
     if args.warmup_steps.endswith("e"):
         warmup_steps = float(args.warmup_steps.removesuffix("e"))
-        warmup_steps = warmup_steps * steps_per_epoch
+        warmup_steps = warmup_steps * ebs_steps_per_epoch
     else:
         warmup_steps  = int(args.warmup_steps)
 
@@ -393,7 +389,7 @@ def main():
             print("  Skipping --use_snr: invalid with scheduler", type(noise_sched))
             args.use_snr = False
 
-    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={steps_per_epoch})")
+    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={ebs_steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
     print(f"        warmup={warmup_steps}, betas=",
           args.betas if args.betas else "(default)",
@@ -401,7 +397,7 @@ def main():
           args.weight_decay if args.weight_decay else "(default)",
     )
 
-    unet, dl, optim = accelerator.prepare(pipe.unet, dl, optim)
+    unet, dl, optim = accelerator.prepare(pipe.unet, mix_loader, optim)
     unet.train()
 
     scheduler_args = {
@@ -460,10 +456,10 @@ def main():
     lr_sched = accelerator.prepare(lr_sched)
 
     if args.gradient_topk:
-        from train_grad_topk import apply_global_topk_gradients
+        from train_grad_topk import sparsify_sd15_gradients
 
-    global_step = 0 
-    batch_count = 0
+    global_step = 0 # micro-batch count
+    batch_count = 0 # effective-batch-size count, aka num of fullsize batches
     accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
     latent_paths = []
 
@@ -507,7 +503,7 @@ def main():
     #######################################################
     #    Core training code. Very Long!!                  #
     #######################################################
-    def train_micro_batch(unet):
+    def train_micro_batch(unet, batch):
         nonlocal batch_count, global_step, accum_loss, accum_mse, accum_qk, accum_norm, epoch_count
         nonlocal latent_paths
 
@@ -603,7 +599,7 @@ def main():
             accelerator.wait_for_everyone()
             accelerator.backward(loss)
             if args.gradient_topk:
-                apply_global_topk_gradients(unet, keep_frac=args.gradient_topk)
+                sparsify_sd15_gradients(unet, keep_frac=args.gradient_topk)
 
         # -----logging & ckp save  ----------------------------------------- #
         if accelerator.is_main_process:
@@ -623,7 +619,7 @@ def main():
 
 
             pbar.set_description_str((
-                    f"E{epoch}/{total_epochs}"
+                    f"E{epoch_count}/{total_epochs}"
                     f"({batch_count:05})"  #PROBLEM HERE
                     ))
             pbar.set_postfix_str((f" l: {loss.item():.3f}"
@@ -656,7 +652,7 @@ def main():
                     tb_writer.add_scalar("train/qk_grads_av", accum_qk, batch_count)
                     tb_writer.add_scalar("train/grad_norm", accum_norm, batch_count)
                     accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
-                    tb_writer.add_scalar("train/epoch_progress", epoch_count / steps_per_epoch,  batch_count)
+                    tb_writer.add_scalar("train/epoch_progress", epoch_count / ebs_steps_per_epoch,  batch_count)
                 except Exception as e:
                     print("Error logging to tensorboard")
 
@@ -675,7 +671,6 @@ def main():
                 lr_sched.step(); 
             pbar.update(1)
             batch_count += 1
-            epoch_count += 1
 
             trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
             if os.path.exists(trigger_path):
@@ -709,9 +704,10 @@ def main():
                 leave=True)
     """
 
-    total_epochs = math.ceil(max_steps / steps_per_epoch)
+    total_epochs = math.ceil(max_steps / ebs_steps_per_epoch)
+    mix_iter = iter(mix_loader)
 
-    for epoch in range(total_epochs):
+    for epoch_count in range(total_epochs):
         if args.save_on_epoch:
             checkpointandsave()
 
@@ -719,22 +715,23 @@ def main():
             # Implement a stair-stepped decay, updating on epoch to what the smooth would be at this point
             lr_sched.step(batch_count)
 
-        pbar = tqdm(range(steps_per_epoch),
-                    desc=f"E{epoch}/{total_epochs}", 
+        pbar = tqdm(range(ebs_steps_per_epoch),
+                    desc=f"E{epoch_count}/{total_epochs}", 
                     bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}", 
                     dynamic_ncols=True,
                     leave=True)
 
-        epoch_count =  0
 
         # "batch" is actually micro-batch
         # yes this will stop at end of shortest dataset.
         # Every dataset will get equal value. I'm not messing around with
         #  custom "balancing"
-        for batch in chain.from_iterable(zip(*dataloaders)):
+        for _ in range(micro_steps_per_epoch):
             if batch_count >= max_steps:
                 break
-            train_micro_batch(unet)
+            step, batch = next(mix_iter)
+
+            train_micro_batch(unet, batch) # this bumps batch_count only for EBS size
 
         pbar.close()
         if batch_count >= max_steps:
