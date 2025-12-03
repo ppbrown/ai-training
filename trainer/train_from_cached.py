@@ -150,6 +150,9 @@ def main():
         print("Training full prior Unet")
         pipe.unet.requires_grad_(True)
 
+    if args.force_txtcache:
+        print("Forcing use of single txtcache file", args.force_txtcache)
+
     if args.reinit_unet:
         print("Training Unet from scratch")
         """ This does not work!!
@@ -251,7 +254,7 @@ def main():
     vae, unet = pipe.vae.eval(), pipe.unet
 
     noise_sched = pipe.scheduler
-    print("Pipe is using noise scheduler", type(noise_sched))
+    print("Pipe is using noise scheduler", type(noise_sched).__name__)
     """
     It was once suggested to swap out  PNDMScheduler for DDPMScheduler,
     JUST for training.
@@ -291,14 +294,15 @@ def main():
     dataloaders = []
     micro_steps_per_epoch = 0 # "micro" means "size directly run on gpu"
     ebs_steps_per_epoch = 0   # Effective-batch_size
-
+    unsupervised = True if args.force_txtcache else False
     for dirs in args.train_data_dir:
         # remember, dirs can contain more than one dirname
         ds = CaptionImgDataset(dirs, 
                                batch_size=bs,
                                txtcache_suffix=args.txtcache_suffix,
                                imgcache_suffix=args.imgcache_suffix,
-                               gradient_accum=accum
+                               gradient_accum=accum,
+                               unsupervised=unsupervised,
                                )
 
         # Yes keep this using microbatch not effective batch size
@@ -320,6 +324,7 @@ def main():
     # dl count already divided by micro batch size.
     # So now calculate EBS steps
     ebs_steps_per_epoch = micro_steps_per_epoch // accum
+    print("Using", micro_steps_per_epoch * bs, "as image count per epoch")
 
     if args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
@@ -518,6 +523,8 @@ def main():
 
             embeds = []
             for cache_file in batch["txt_cache"]:
+                if args.force_txtcache:
+                    cache_file = args.force_txtcache
                 if Path(cache_file).suffix == ".h5":
                     arr = h5f["emb"][:]
                     emb = torch.from_numpy(arr)
