@@ -78,7 +78,7 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
     # Make sure that prompt order doesnt change effective seed
     generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
 
-    images = pipe(prompt, num_inference_steps=30, generator=generator).images
+    images = pipe(prompt, num_inference_steps=args.sample_steps, generator=generator).images
     for ndx, image in enumerate(images):
         fname=f"sample-{seed}-{ndx}.png"
         outname=f"{CHECKPOINT_DIR}/{fname}"
@@ -210,6 +210,10 @@ def main():
         from train_reinit import retrain_time
         retrain_time(pipe.unet, reset=False)
 
+    if args.unfreeze_attn2:
+        from train_reinit import unfreeze_attn2
+        unfreeze_attn2(pipe.unet, reset=False)
+
     if args.unfreeze_up_blocks:
         print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) upblocks of Unet")
         from train_reinit import unfreeze_up_blocks
@@ -233,7 +237,7 @@ def main():
         unfreeze_all_attention(pipe.unet)
     # ------------------------------------------ #
 
-    if args.save_start:
+    if args.save_start > 0:
         print("save_start limit set to",args.save_start)
     if args.cpu_offload:
         print("Enabling cpu offload")
@@ -324,7 +328,12 @@ def main():
     # dl count already divided by micro batch size.
     # So now calculate EBS steps
     ebs_steps_per_epoch = micro_steps_per_epoch // accum
-    print("Using", micro_steps_per_epoch * bs, "as image count per epoch")
+    print(f"Shortest dataset = {shortest_dl_len} microbatches")
+    print(f"   {len(dataloaders)} datasets x ({shortest_dl_len} x {bs}) ... ")
+    print("    => Using", 
+          micro_steps_per_epoch * bs, 
+          "as image count per epoch:", 
+          ebs_steps_per_epoch, "steps per epoch")
 
     if args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
@@ -519,7 +528,13 @@ def main():
                 latent = st.load_file(cache_file)["latent"]
                 latent_paths.append(cache_file)
                 latents.append(latent)
-            latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
+            try:
+                latents = torch.stack(latents).to(device, dtype=compute_dtype) * latent_scaling
+            except RuntimeError as e:
+                print("Problem loading this latest batch")
+                print(e)
+                print(batch)
+                exit(1)
 
             embeds = []
             for cache_file in batch["txt_cache"]:
@@ -693,7 +708,7 @@ def main():
                     print("warning: got exception", e)
 
             elif args.save_steps and (batch_count % args.save_steps == 0):
-                if batch_count > int(args.save_start or 0):
+                if batch_count >= int(args.save_start):
                     print(f"Saving @{batch_count:05} (save every {args.save_steps} steps)")
                     checkpointandsave()
 
