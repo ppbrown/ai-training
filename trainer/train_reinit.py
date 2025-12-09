@@ -125,6 +125,18 @@ def reinit_cross_attention_outproj(model):
                 affected += p.numel()
     print(f"[reinit_cross_attention_outproj] zeroed {affected/1e6:.2f} M params ")
 
+# Useful for text encoder realignment
+def unfreeze_attn2(unet):
+    """
+    SD1.5: unfreeze ONLY cross-attention (attn2) weights.
+    Assumes you already froze everything else.
+    """
+    n = 0
+    for name, p in unet.named_parameters():
+        if ".transformer_blocks." in name and ".attn2." in name:
+            p.requires_grad = True
+            n += p.numel()
+    print(f"[unfreeze_sd15_attn2] enabled {n/1e6:.2f} M params")
 
 
 # I think "cross attention" is specifically for text emb mapping.
