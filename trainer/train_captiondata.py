@@ -55,7 +55,7 @@ class CaptionImgDataset(Dataset):
             print(f"Trimming dataset from {len(self.files)} to {trimmed_len} for batchsize align.")
             self.files = self.files[:trimmed_len]
 
-        print(f"Combined dataset length for this set: {len(self.files)}")
+        print(f"** Combined dataset length for this set: {len(self.files)}")
 
     def __len__(self):
         return len(self.files)
