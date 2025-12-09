@@ -34,12 +34,13 @@ def parse_args():
     p.add_argument("--max_steps",      default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
     p.add_argument("--save_steps",     type=int, help="Measured in effective batchsize(b * a)")
-    p.add_argument("--save_start",     type=int, help="Dont start saving until past this step")
+    p.add_argument("--save_start",     type=int, default=0, help="Dont start saving or samples until this step")
     p.add_argument("--save_on_epoch",  action="store_true")
     p.add_argument("--force_toklen",   type=int, 
                    help="Force token length to a single value, like 256. Use for T5 cache")
 
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
+    p.add_argument("--sample_steps", type=int, default=30, help="Default=30")
     p.add_argument("--seed",        type=int, default=90)
     p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="Default=.txt_t5cache")
     p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
@@ -102,9 +103,9 @@ def parse_args():
     p.add_argument("--unfreeze_time", action="store_true",
                    help="Attempt to unfreeze just noise schedule layer")
     p.add_argument("--unfreeze_up_blocks", type=int, nargs="+",
-                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
+                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]. 3 is outer layer, fine detail")
     p.add_argument("--unfreeze_down_blocks", type=int, nargs="+",
-                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]")
+                   help="Just unfreeze, dont reinit. Give 1 or more space-seperated numbers ranged [0-3]. 0 is outer layer, fine detail")
     p.add_argument("--unfreeze_mid_block", action="store_true",
                    help="Just unfreeze, dont reinit.")
     p.add_argument("--unfreeze_norms", action="store_true",
@@ -112,6 +113,8 @@ def parse_args():
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
     p.add_argument("--unfreeze_attention", action="store_true",
+                   help="Just unfreeze, dont reinit.")
+    p.add_argument("--unfreeze_attn2", action="store_true",
                    help="Just unfreeze, dont reinit.")
 
 
