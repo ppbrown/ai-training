@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 
 
 class CaptionImgDataset(Dataset):
-    """ Class to store paths to img/txt cache file files, as loaded from the
+    """ Class to store paths of img/txt cache file files, as loaded from the
     one or more directory names passed at init.
     Both batch size and accum must be whole integers >= 1 
     They will then be used to cleanly truncate total number of files in the dataset, if needed.
