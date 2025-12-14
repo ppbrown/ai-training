@@ -194,11 +194,11 @@ def main():
         from train_reinit import retrain_out
         retrain_out(pipe.unet, reset=False)
     if args.reinit_in:
-        print("Attempting to reset in layers of Unet")
+        print("Attempting to reset In layers of Unet")
         from train_reinit import retrain_in
         retrain_in(pipe.unet, reset=True)
     elif args.unfreeze_in:
-        print("Attempting to unfreeze in layers of Unet")
+        print("Attempting to unfreeze In layers of Unet")
         from train_reinit import retrain_in
         retrain_in(pipe.unet, reset=False)
     if args.reinit_time:
