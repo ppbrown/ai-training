@@ -29,6 +29,9 @@ class CaptionImgDataset(Dataset):
             extra="" if unsupervised else f" and {txtcache_suffix}"
             print(f"Scanning {root} for {imgcache_suffix}{extra}",
                 f"matching {extset}")
+            if not Path(root).exists():
+                print("\nERROR: nonexistent directory", root)
+                exit(1)
             subtotal=0
             for ext in extset:
                 for p in Path(root).rglob(f"*.{ext}"):
