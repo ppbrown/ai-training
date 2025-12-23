@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Print JPEGs likely too low-quality for HQ training (DOF-friendly sharpness test)."
     )
-    ap.add_argument("root", help="Root directory to scan recursively.")
+    ap.add_argument("roots", nargs="+", help="Root directories to scan recursively.")
     ap.add_argument(
         "--min-short-side",
         type=int,
@@ -109,33 +109,34 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    root = Path(args.root)
 
-    for p in iter_jpegs(root):
-        try:
-            with Image.open(p) as im:
-                w, h = im.size
-                gray = np.array(im.convert("L"), dtype=np.uint8)
+    for root in args.roots:
 
-            too_small = min(w, h) < args.min_short_side
-            sharp_patches = 0 if too_small else count_sharp_patches(
-                gray_u8=gray,
-                patch_size_px=args.patch_size,
-                sharp_patch_thr=args.sharp_patch_thr,
-            )
-            passes = (not too_small) and (sharp_patches >= args.min_sharp_patches)
+        for p in iter_jpegs(Path(root)):
+            try:
+                with Image.open(p) as im:
+                    w, h = im.size
+                    gray = np.array(im.convert("L"), dtype=np.uint8)
 
-            if args.print_passing:
-                if passes:
+                too_small = min(w, h) < args.min_short_side
+                sharp_patches = 0 if too_small else count_sharp_patches(
+                    gray_u8=gray,
+                    patch_size_px=args.patch_size,
+                    sharp_patch_thr=args.sharp_patch_thr,
+                )
+                passes = (not too_small) and (sharp_patches >= args.min_sharp_patches)
+
+                if args.print_passing:
+                    if passes:
+                        print(str(p))
+                else:
+                    if not passes:
+                        print(str(p))
+
+            except Exception:
+                # Unreadable/corrupt -> treat as failing unless user asked for passing-only.
+                if not args.print_passing:
                     print(str(p))
-            else:
-                if not passes:
-                    print(str(p))
-
-        except Exception:
-            # Unreadable/corrupt -> treat as failing unless user asked for passing-only.
-            if not args.print_passing:
-                print(str(p))
 
 
 if __name__ == "__main__":
