@@ -8,6 +8,9 @@ Behavior:
   - If -b: print JPEGs that FAIL the blur/sharpness checks.
   - If -g: print JPEGs that are grainy (noise_score >= threshold).
 Each filename is printed at most once even if it fails both checks.
+
+Default grainy values are somewhat permissive. I may use
+  --noise-thr 0.6 --flat-percentile 50
 """
 
 from __future__ import annotations
@@ -151,13 +154,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("-b", "--blurry", action="store_true", help="Run blur/sharpness test (prints failing files).")
     ap.add_argument("-g", "--grainy", action="store_true", help="Run grain/high-ISO noise test (prints grainy files).")
 
-    ap.add_argument("--min-short-side", type=int, default=512)
-    ap.add_argument("--patch-size", type=int, default=64)
-    ap.add_argument("--sharp-patch-thr", type=float, default=120.0)
-    ap.add_argument("--min-sharp-patches", type=int, default=6)
+    ap.add_argument("--min-short-side", type=int, default=512, help="default=512")
+    ap.add_argument("--patch-size", type=int, default=64, help="default=64")
+    ap.add_argument("--sharp-patch-thr", type=float, default=120.0, help="default=120.0")
+    ap.add_argument("--min-sharp-patches", type=int, default=6, help="default=6")
 
-    ap.add_argument("--noise-thr", type=float, default=6.0)
-    ap.add_argument("--flat-percentile", type=float, default=30.0)
+    ap.add_argument("--noise-thr", type=float, default=2.0, 
+                    help="Safe ranges: (Strict 0.4) < (Permissive 2.0) < (Special Cases 6.0). default=2.0")
+    ap.add_argument("--flat-percentile", type=float, default=15.0, 
+                    help="For noise detection, related to edge detection. Typical ranges: (Permissive 10) <> (Strict 60). default=15.0")
 
     args = ap.parse_args()
     if not args.blurry and not args.grainy:
