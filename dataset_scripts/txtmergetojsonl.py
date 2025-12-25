@@ -71,7 +71,7 @@ def find_matching_object(data_list, url):
     return None
 
 
-# Return a json.load object
+# Return a json.load object (or None)
 def merge_json_and_txt(txt_file):
     try:
         with open(txt_file) as f:
@@ -88,7 +88,8 @@ def merge_json_and_txt(txt_file):
         data[FIELD] = txt
 
     except Exception as e:
-        print(f"Error processing {txt_file}: {e}", file=sys.stderr)
+        print(f"Error {e.__name__} processing {txt_file}: {e}", file=sys.stderr)
+        return None
     return data
 
 def main(jsonl_file):
