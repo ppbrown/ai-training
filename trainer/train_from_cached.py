@@ -351,6 +351,7 @@ def main():
     opt_args = {
         **({'weight_decay': args.weight_decay} if args.weight_decay is not None else {}),
         **({'betas': tuple(args.betas)} if args.betas else {}),
+        **({'d0': args.initial_d} if args.initial_d else {}),
     }
     if args.optimizer == "py_lion":
         import lion_pytorch
@@ -506,6 +507,11 @@ def main():
             if not os.path.exists(savefile):
                 tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
                 shutil.copy(args.copy_config, args.output_dir)
+
+                import yaml
+                savefile = os.path.join(args.output_dir, "args.yaml")
+                tqdm.write(f"Saving commandline to  {savefile}")
+                Path(savefile).write_text(yaml.safe_dump(vars(args), sort_keys=True))
 
         savefile = os.path.join(ckpt_dir, "latent_paths")
         with open(savefile, "w") as f:

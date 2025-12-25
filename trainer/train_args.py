@@ -62,6 +62,7 @@ def parse_args():
                    help="Subtract this every epoch, if schedler==constant")
     p.add_argument("--min_lr_ratio",   type=float, default=0.1, 
                    help="Actually a ratio, not hard number. Only used if 'min_lr' type schedulers are used")
+    p.add_argument("--initial_d",  type=float, help="WOO! Hit the Downhill! (With d_lion)")
     p.add_argument("--rex_start_factor", type=float, default=1.0, help="Only used with REX Scheduler during warmup steps. Must be greater than 0. Default=1")
     p.add_argument("--rex_end_factor", action='store_const', const=1.0, default=1.0,
                    help='[read-only] fixed at 1.0; providing a value is an error')
