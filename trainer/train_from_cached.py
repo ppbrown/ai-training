@@ -372,6 +372,8 @@ def main():
         base_lr = peak_lr
         if base_lr < 0.1:
             print("WARNING: Typically, DAdaptLion expects LR of 1.0")
+        if args.initial_d:
+            print("Note; initial_d set to", args.initial_d)
 
         optim = DAdaptLion(
             trainable_params,
