@@ -11,8 +11,13 @@ from typing import Sequence
 
 def sparsify_sd15_gradients(unet, keep_frac):
     """
-    This is the one routine outside should be calling.
+    This is the one routine called from outside this file.
+    Look at the 'important' gradients, and then null out the gradients that
+    are not in the top "keep" percent.
     "keep_frac" is really a decimal percentage, 0.0 < frac <1.0
+
+    NOTE: Even with only limiting ourselves to a fraction, doing these calcs
+    is a HUGE performance hit. 50%. Even worse if we dont limit them.
     """
     important_params = collect_sd15_important_params(unet)
     apply_topk_to_params(important_params, keep_frac)
@@ -56,7 +61,7 @@ def collect_sd15_important_params(unet) -> list[torch.nn.Parameter]:
     """
     Optimizing filter for topk, targetting SD1.5 model
     Applying it to the entire model is REALLY SLOW, so
-    identify just the layers that matter a lot:
+    return a list of just the layers that matter a lot(to text understanding):
 
     - attention weights (q/k/v/out) in attn1/attn2/transformer
     - optionally mid_block
