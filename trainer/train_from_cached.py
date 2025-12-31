@@ -35,16 +35,21 @@ from diffusers.training_utils import compute_snr
 
 # diffusers optimizers dont have a min_lr arg,
 # so dont use that scheduler
-#from diffusers.optimization import get_scheduler
+# from diffusers.optimization import get_scheduler
 from transformers import get_scheduler
 
 from torch.utils.tensorboard import SummaryWriter
 
 import lion_pytorch
 
-# Speed boost, as long as we dont need "strict fp32 math"
+# Speed boost for fp32 training.
+# We give up "strict fp32 math", for an alleged negligable
+# accuracy difference, and 30% speed boost.
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+
+# This enables profiling on first batch,
+# which then SPEEDS UP subsequent runs automaticaly
 torch.backends.cudnn.benchmark = True
 
 
@@ -53,6 +58,7 @@ torch.backends.cudnn.benchmark = True
 # --------------------------------------------------------------------------- #
 
 from train_captiondata import CaptionImgDataset
+
 
 def collate_fn(examples):
     return {
@@ -65,23 +71,24 @@ def collate_fn(examples):
 def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
     tqdm.write(f"Trying render of '{prompt}' using seed {seed} ..")
     pipe = DiffusionPipeline.from_pretrained(
-        CHECKPOINT_DIR, 
-        custom_pipeline=PIPELINE_CODE_DIR, 
+        CHECKPOINT_DIR,
+        custom_pipeline=PIPELINE_CODE_DIR,
         use_safetensors=True,
         safety_checker=None, requires_safety_checker=False,
-        #torch_dtype=torch.bfloat16,
+        # torch_dtype=torch.bfloat16,
     )
-    pipe.safety_checker=None
+    pipe.safety_checker = None
     pipe.set_progress_bar_config(disable=True)
     pipe.enable_sequential_cpu_offload()
 
     # Make sure that prompt order doesnt change effective seed
-    generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
+    generator = [torch.Generator(device="cuda").manual_seed(seed)
+                 for _ in range(len(prompt))]
 
     images = pipe(prompt, num_inference_steps=args.sample_steps, generator=generator).images
     for ndx, image in enumerate(images):
-        fname=f"sample-{seed}-{ndx}.png"
-        outname=f"{CHECKPOINT_DIR}/{fname}"
+        fname = f"sample-{seed}-{ndx}.png"
+        outname = f"{CHECKPOINT_DIR}/{fname}"
         image.save(outname)
         print(f"Saved {outname}")
 
@@ -110,7 +117,7 @@ def main():
 
     print("Training type:", "fp32" if args.fp32 else "mixed precision")
 
-    model_dtype   = torch.float32 # Always load master in full fp32
+    model_dtype   = torch.float32  # Always load master in full fp32
     compute_dtype = torch.float32 if args.fp32 else torch.bfloat16 # runtime math dtype
 
     accelerator = Accelerator(
@@ -119,15 +126,15 @@ def main():
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
-    
+
 
 
     # ----- load pipeline --------------------------------------------------- #
 
     if args.is_custom:
-        custom_pipeline=args.pretrained_model
+        custom_pipeline = args.pretrained_model
     else:
-        custom_pipeline=None
+        custom_pipeline = None
 
     print(f"Loading '{args.pretrained_model}' Custom pipeline? {custom_pipeline}")
     try:
@@ -215,11 +222,13 @@ def main():
         unfreeze_attn2(pipe.unet, reset=False)
 
     if args.unfreeze_up_blocks:
-        print(f"Attempting to unfreeze (({args.unfreeze_up_blocks})) upblocks of Unet")
+        print(f"Attempting to unfreeze (({args.unfreeze_up_blocks}))"
+              " upblocks of Unet")
         from train_reinit import unfreeze_up_blocks
         unfreeze_up_blocks(pipe.unet, args.unfreeze_up_blocks, reset=False)
     if args.unfreeze_down_blocks:
-        print(f"Attempting to unfreeze (({args.unfreeze_down_blocks})) downblocks of Unet")
+        print(f"Attempting to unfreeze (({args.unfreeze_down_blocks}))"
+              " downblocks of Unet")
         from train_reinit import unfreeze_down_blocks
         unfreeze_down_blocks(pipe.unet, args.unfreeze_down_blocks, reset=False)
     if args.unfreeze_mid_block:
@@ -238,7 +247,7 @@ def main():
     # ------------------------------------------ #
 
     if args.save_start > 0:
-        print("save_start limit set to",args.save_start)
+        print("save_start limit set to", args.save_start)
     if args.cpu_offload:
         print("Enabling cpu offload")
         pipe.enable_model_cpu_offload()
@@ -271,7 +280,7 @@ def main():
         print("DEBUG: add_noise not present: presuming FlowMatch desired")
 
     latent_scaling = vae.config.scaling_factor
-    print("VAE scaling factor is",latent_scaling)
+    print("VAE scaling factor is", latent_scaling)
 
 
     # Freeze VAE (and T5) so only UNet is optimised; comment-out to train all.
@@ -292,7 +301,7 @@ def main():
         "parameters will be updated"
     )
 
-    # ----- load data ------------------------------------------------------------ #
+    # ----- load data ------------------------------------------------ #
     bs = args.batch_size ; accum = args.gradient_accum
     effective_batch_size = bs * accum
     dataloaders = []
@@ -301,7 +310,7 @@ def main():
     unsupervised = True if args.force_txtcache else False
     for dirs in args.train_data_dir:
         # remember, dirs can contain more than one dirname
-        ds = CaptionImgDataset(dirs, 
+        ds = CaptionImgDataset(dirs,
                                batch_size=bs,
                                txtcache_suffix=args.txtcache_suffix,
                                imgcache_suffix=args.imgcache_suffix,
@@ -311,18 +320,18 @@ def main():
 
         # Yes keep this using microbatch not effective batch size
         # If you want to be fancy, maybe aim for accum = number of dataloaders
-        dl = DataLoader(ds, batch_size=bs, 
+        dl = DataLoader(ds, batch_size=bs,
                         shuffle=True,
                         drop_last=True,
                         num_workers=8, persistent_workers=True,
                         pin_memory=True, collate_fn=collate_fn,
                         prefetch_factor=4)
-        if len(dl)<1:
+        if len(dl) < 1:
             raise ValueError("Error: dataset invalid")
 
         dataloaders.append(dl)
     mix_loader = InfiniteLoader(*dataloaders)
-    
+
     shortest_dl_len = mix_loader.get_shortest_len()
     micro_steps_per_epoch = shortest_dl_len * len(dataloaders)
     # dl count already divided by micro batch size.
@@ -330,9 +339,9 @@ def main():
     ebs_steps_per_epoch = micro_steps_per_epoch // accum
     print(f"Shortest dataset = {shortest_dl_len} microbatches")
     print(f"   {len(dataloaders)} datasets x ({shortest_dl_len} x {bs}) ... ")
-    print("    => Using", 
-          micro_steps_per_epoch * bs, 
-          "as image count per epoch:", 
+    print("    => Using",
+          micro_steps_per_epoch * bs,
+          "as image count per epoch:",
           ebs_steps_per_epoch, "steps per epoch")
 
     if args.max_steps and args.max_steps.endswith("e"):
@@ -355,16 +364,16 @@ def main():
     }
     if args.optimizer == "py_lion":
         import lion_pytorch
-        optim = lion_pytorch.Lion(trainable_params, 
-                                  lr=peak_lr, 
+        optim = lion_pytorch.Lion(trainable_params,
+                                  lr=peak_lr,
                                   **opt_args
                                   )
     elif args.optimizer == "opt_lion":
         from optimi import Lion # torch-optimi pip module
-        optim = Lion(trainable_params, 
-                                  lr=peak_lr, 
-                                  **opt_args
-                                  )
+        optim = Lion(trainable_params,
+                     lr=peak_lr,
+                     **opt_args
+                     )
     elif args.optimizer == "d_lion":
         from dadaptation import DAdaptLion
         # D-Adapt controls the step size; a large/base LR is expected.
@@ -382,8 +391,8 @@ def main():
         )
     elif args.optimizer == "adamw8":
         import bitsandbytes as bnb
-        optim = bnb.optim.AdamW8bit(trainable_params, 
-                                    lr=peak_lr, 
+        optim = bnb.optim.AdamW8bit(trainable_params,
+                                    lr=peak_lr,
                                     **opt_args
                                     )
     elif args.optimizer == "adamw":
@@ -425,18 +434,18 @@ def main():
 
     scheduler_args["scheduler_specific_kwargs"] = {}
     if args.scheduler == "cosine_with_min_lr":
-        scheduler_args["scheduler_specific_kwargs"]["min_lr_rate"] = args.min_lr_ratio 
+        scheduler_args["scheduler_specific_kwargs"]["min_lr_rate"] = args.min_lr_ratio
         print(f"  Setting min_lr_ratio to {args.min_lr_ratio}")
     if args.num_cycles:
-        #technically this should only be used for cosine types?
-        scheduler_args["scheduler_specific_kwargs"]["num_cycles"] = args.num_cycles 
+        # technically this should only be used for cosine types?
+        scheduler_args["scheduler_specific_kwargs"]["num_cycles"] = args.num_cycles
         print(f"  Setting num_cycles to {args.num_cycles}")
 
 
     if args.scheduler.lower() == "rex":
         from torch.optim.lr_scheduler import LinearLR, SequentialLR
         # from pytorch_optimizer.lr_scheduler.rex import REXScheduler - this is not compatible
-        from axolotl.utils.schedulers import RexLR 
+        from axolotl.utils.schedulers import RexLR
 
         rex = RexLR(
             optim,
@@ -502,7 +511,7 @@ def main():
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
         pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
         if args.sample_prompt is not None:
-            sample_img(args.sample_prompt, args.seed, ckpt_dir, 
+            sample_img(args.sample_prompt, args.seed, ckpt_dir,
                        custom_pipeline)
         if args.copy_config:
             savefile = os.path.join(args.output_dir, args.copy_config)
@@ -596,7 +605,7 @@ def main():
                 bsz = latents.size(0)
                 eps = args.min_sigma  # avoid divide-by-zero magic
                 noise = torch.randn_like(latents)
-                
+
                 s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
                 timesteps = s.to(torch.float32).mul(999.0)
 
@@ -650,13 +659,13 @@ def main():
 
             pbar.set_description_str((
                     f"E{epoch_count}/{total_epochs}"
-                    f"({batch_count:05})"  #PROBLEM HERE
+                    f"({batch_count:05})"  # PROBLEM HERE
                     ))
             pbar.set_postfix_str((f" l: {loss.item():.3f}"
                                   f" raw: {raw_mse_loss.item():.3f}"
                                   f" lr: {current_lr:.1e}"
-                                  #f" qk: {qk_grad_sum:.1e}"
-                                  #f" gr: {total_norm:.1e}"
+                                  # f" qk: {qk_grad_sum:.1e}"
+                                  # f" gr: {total_norm:.1e}"
                                   ))
 
 
@@ -695,10 +704,10 @@ def main():
         # We have to take into account gradient accumilation!!
         # This is one reason it has to default to "1", not "0"
         if global_step % args.gradient_accum == 0:
-            optim.step(); 
+            optim.step();
             optim.zero_grad()
             if not args.scheduler_at_epoch:
-                lr_sched.step(); 
+                lr_sched.step();
             pbar.update(1)
             batch_count += 1
 
@@ -706,7 +715,7 @@ def main():
             if os.path.exists(trigger_path):
                 print("trigger.checkpoint detected. ...")
                 # It is tempting to put this in the same place as the other save.
-                # But, we want to include this one in the 
+                # But, we want to include this one in the
                 #   "did we complete a full batch?"
                 # logic
                 checkpointandsave()
@@ -728,7 +737,7 @@ def main():
 
     # ----- training loop --------------------------------------------------- #
     """ Old way
-    ebar = tqdm(range(math.ceil(max_steps / len(dl))), 
+    ebar = tqdm(range(math.ceil(max_steps / len(dl))),
                 desc="Epoch", unit="", dynamic_ncols=True,
                 position=0,
                 leave=True)
@@ -746,8 +755,8 @@ def main():
             lr_sched.step(batch_count)
 
         pbar = tqdm(range(ebs_steps_per_epoch),
-                    desc=f"E{epoch_count}/{total_epochs}", 
-                    bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}", 
+                    desc=f"E{epoch_count}/{total_epochs}",
+                    bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
                     dynamic_ncols=True,
                     leave=True)
 
@@ -772,7 +781,7 @@ def main():
             tb_writer.close()
         if False:
             pipe.save_pretrained(args.output_dir, safe_serialization=True)
-            sample_img(args.sample_prompt, args.seed, args.output_dir, 
+            sample_img(args.sample_prompt, args.seed, args.output_dir,
                        custom_pipeline)
             print(f"finished:model saved to {args.output_dir}")
         else:
