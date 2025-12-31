@@ -41,6 +41,10 @@ if os.environ.get(ENV_VAR) != DESIRED:
 torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
 
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="stabilityai/stable-diffusion-xl-base-1.0",
