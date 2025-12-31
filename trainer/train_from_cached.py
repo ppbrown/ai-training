@@ -25,13 +25,11 @@ import torch
 import safetensors.torch as st
 from torch.utils.data import Dataset, DataLoader
 
-
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from diffusers import DiffusionPipeline, UNet2DConditionModel
 from diffusers import DDPMScheduler, PNDMScheduler
 from diffusers.models.attention import Attention as CrossAttention
 from diffusers.training_utils import compute_snr
-
 
 # diffusers optimizers dont have a min_lr arg,
 # so dont use that scheduler
@@ -51,7 +49,6 @@ torch.backends.cudnn.allow_tf32 = True
 # This enables profiling on first batch,
 # which then SPEEDS UP subsequent runs automaticaly
 torch.backends.cudnn.benchmark = True
-
 
 # --------------------------------------------------------------------------- #
 # 2. Utils                                                                    #
@@ -93,7 +90,6 @@ def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
         print(f"Saved {outname}")
 
 
-
 def log_unet_l2_norm(unet, tb_writer, step):
     """
     Util to log the overall average parameter size.
@@ -113,12 +109,12 @@ def log_unet_l2_norm(unet, tb_writer, step):
 
 def main():
     torch.manual_seed(args.seed)
-    peak_lr       = args.learning_rate
+    peak_lr = args.learning_rate
 
     print("Training type:", "fp32" if args.fp32 else "mixed precision")
 
-    model_dtype   = torch.float32  # Always load master in full fp32
-    compute_dtype = torch.float32 if args.fp32 else torch.bfloat16 # runtime math dtype
+    model_dtype = torch.float32  # Always load master in full fp32
+    compute_dtype = torch.float32 if args.fp32 else torch.bfloat16  # runtime math dtype
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
@@ -126,8 +122,6 @@ def main():
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
-
-
 
     # ----- load pipeline --------------------------------------------------- #
 
@@ -147,7 +141,6 @@ def main():
         print("Error loading model", args.pretrained_model)
         print(e)
         exit(0)
-
 
     # -- unet trainable selection -- #
     if args.targetted_training:
@@ -282,7 +275,6 @@ def main():
     latent_scaling = vae.config.scaling_factor
     print("VAE scaling factor is", latent_scaling)
 
-
     # Freeze VAE (and T5) so only UNet is optimised; comment-out to train all.
     for p in vae.parameters():                p.requires_grad_(False)
     for p in pipe.text_encoder.parameters():  p.requires_grad_(False)
@@ -290,23 +282,23 @@ def main():
         print("T5 (projection layer) scaling factor is", pipe.t5_projection.config.scaling_factor)
         for p in pipe.t5_projection.parameters(): p.requires_grad_(False)
 
-
     # Gather just-trainable parameters
     trainable_params = [p for p in unet.parameters() if p.requires_grad]
     if not trainable_params:
         print("ERROR: no layers selected for training")
         exit(0)
     print(
-        f"Align-phase: {sum(p.numel() for p in trainable_params)/1e6:.2f} M "
+        f"Align-phase: {sum(p.numel() for p in trainable_params) / 1e6:.2f} M "
         "parameters will be updated"
     )
 
     # ----- load data ------------------------------------------------ #
-    bs = args.batch_size ; accum = args.gradient_accum
+    bs = args.batch_size
+    accum = args.gradient_accum
     effective_batch_size = bs * accum
     dataloaders = []
-    micro_steps_per_epoch = 0 # "micro" means "size directly run on gpu"
-    ebs_steps_per_epoch = 0   # Effective-batch_size
+    micro_steps_per_epoch = 0  # "micro" means "size directly run on gpu"
+    ebs_steps_per_epoch = 0  # Effective-batch_size
     unsupervised = True if args.force_txtcache else False
     for dirs in args.train_data_dir:
         # remember, dirs can contain more than one dirname
@@ -353,7 +345,7 @@ def main():
         warmup_steps = float(args.warmup_steps.removesuffix("e"))
         warmup_steps = warmup_steps * ebs_steps_per_epoch
     else:
-        warmup_steps  = int(args.warmup_steps)
+        warmup_steps = int(args.warmup_steps)
 
     # Common args that may or may not be defined
     # Allow fall-back to optimizer-specific defaults
@@ -369,7 +361,7 @@ def main():
                                   **opt_args
                                   )
     elif args.optimizer == "opt_lion":
-        from optimi import Lion # torch-optimi pip module
+        from optimi import Lion  # torch-optimi pip module
         optim = Lion(trainable_params,
                      lr=peak_lr,
                      **opt_args
@@ -407,7 +399,7 @@ def main():
         exit(1)
 
     # -- optimizer settings...
-    print("Using optimizer",args.optimizer)
+    print("Using optimizer", args.optimizer)
     if args.use_snr:
         if hasattr(noise_sched, "alphas_cumprod"):
             print(f"  Using MinSNR with gamma of {args.noise_gamma}")
@@ -415,13 +407,14 @@ def main():
             print("  Skipping --use_snr: invalid with scheduler", type(noise_sched))
             args.use_snr = False
 
-    print(f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={ebs_steps_per_epoch})")
+    print(
+        f"  NOTE: peak_lr = {peak_lr}, lr_scheduler={args.scheduler}, total steps={max_steps}(steps/Epoch={ebs_steps_per_epoch})")
     print(f"        batch={bs}, accum={accum}, effective batchsize={effective_batch_size}")
     print(f"        warmup={warmup_steps}, betas=",
           args.betas if args.betas else "(default)",
           " weight_decay=",
           args.weight_decay if args.weight_decay else "(default)",
-    )
+          )
 
     unet, dl, optim = accelerator.prepare(pipe.unet, mix_loader, optim)
     unet.train()
@@ -440,7 +433,6 @@ def main():
         # technically this should only be used for cosine types?
         scheduler_args["scheduler_specific_kwargs"]["num_cycles"] = args.num_cycles
         print(f"  Setting num_cycles to {args.num_cycles}")
-
 
     if args.scheduler.lower() == "rex":
         from torch.optim.lr_scheduler import LinearLR, SequentialLR
@@ -466,7 +458,7 @@ def main():
 
     elif args.scheduler.lower() == "linear_with_min_lr":
         from transformers import get_polynomial_decay_schedule_with_warmup
-        base_lr  = args.learning_rate
+        base_lr = args.learning_rate
         floor_lr = base_lr * args.min_lr_ratio
 
         lr_sched = get_polynomial_decay_schedule_with_warmup(
@@ -484,13 +476,16 @@ def main():
     if args.gradient_topk:
         from train_grad_topk import sparsify_sd15_gradients
 
-    global_step = 0 # micro-batch count
-    batch_count = 0 # effective-batch-size count, aka num of fullsize batches
-    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
+    global_step = 0  # micro-batch count
+    batch_count = 0  # effective-batch-size count, aka num of fullsize batches
+    accum_loss = 0.0
+    accum_mse = 0.0
+    accum_qk = 0.0
+    accum_norm = 0.0
     latent_paths = []
 
     run_name = os.path.basename(args.output_dir)
-    tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/",run_name))
+    tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/", run_name))
 
     def checkpointandsave():
         nonlocal latent_paths
@@ -505,7 +500,6 @@ def main():
         pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
         pipe.unet = accelerator.unwrap_model(unet)
         log_unet_l2_norm(pipe.unet, tb_writer, batch_count)
-
 
         print(f"Saving checkpoint to {ckpt_dir}")
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
@@ -528,7 +522,7 @@ def main():
         with open(savefile, "w") as f:
             f.write('\n'.join(latent_paths) + '\n')
             f.close()
-        print("Wrote",len(latent_paths),"loglines to",savefile)
+        print("Wrote", len(latent_paths), "loglines to", savefile)
         latent_paths = []
 
     #######################################################
@@ -583,7 +577,7 @@ def main():
                     else:
                         pad = torch.zeros((MAX_TOK - T, D), dtype=e.dtype, device=e.device)
                         fixed.append(torch.cat([e, pad], dim=0))
-                prompt_emb = torch.stack(fixed, dim=0).to(device, dtype=compute_dtype) # [B, MAX_TOK, D]
+                prompt_emb = torch.stack(fixed, dim=0).to(device, dtype=compute_dtype)  # [B, MAX_TOK, D]
             else:
                 # Take easy path, if using CLIP cache or something where length is already forced
                 prompt_emb = torch.stack(embeds).to(device, dtype=compute_dtype)
@@ -606,7 +600,7 @@ def main():
                 eps = args.min_sigma  # avoid divide-by-zero magic
                 noise = torch.randn_like(latents)
 
-                s = torch.rand(bsz, device=device).mul_(1 - 2*eps).add_(eps)
+                s = torch.rand(bsz, device=device).mul_(1 - 2 * eps).add_(eps)
                 timesteps = s.to(torch.float32).mul(999.0)
 
                 s = s.view(-1, *([1] * (latents.dim() - 1)))  # broadcasting [B,1,1,1]
@@ -619,7 +613,7 @@ def main():
                               encoder_hidden_states=prompt_emb).sample
 
             mse = torch.nn.functional.mse_loss(
-                    model_pred.float(), noise_target.float(), reduction="none")
+                model_pred.float(), noise_target.float(), reduction="none")
             mse = mse.view(mse.size(0), -1).mean(dim=1)
             raw_mse_loss = mse.mean()
 
@@ -656,11 +650,10 @@ def main():
                 accum_loss += loss.item()
                 accum_mse += raw_mse_loss.item()
 
-
             pbar.set_description_str((
-                    f"E{epoch_count}/{total_epochs}"
-                    f"({batch_count:05})"  # PROBLEM HERE
-                    ))
+                f"E{epoch_count}/{total_epochs}"
+                f"({batch_count:05})"  # PROBLEM HERE
+            ))
             pbar.set_postfix_str((f" l: {loss.item():.3f}"
                                   f" raw: {raw_mse_loss.item():.3f}"
                                   f" lr: {current_lr:.1e}"
@@ -668,13 +661,12 @@ def main():
                                   # f" gr: {total_norm:.1e}"
                                   ))
 
-
         # Accelerate will make sure this only gets called on full-batch boundaries
         if accelerator.sync_gradients:
             accum_qk = sum(
-                    p.grad.abs().mean().item()
-                    for n,p in unet.named_parameters()
-                    if p.grad is not None and (".to_q" in n or ".to_k" in n))
+                p.grad.abs().mean().item()
+                for n, p in unet.named_parameters()
+                if p.grad is not None and (".to_q" in n or ".to_k" in n))
             total_norm = 0.0
             for p in unet.parameters():
                 if p.grad is not None:
@@ -690,12 +682,13 @@ def main():
                     tb_writer.add_scalar("train/loss_raw", accum_mse / args.gradient_accum, batch_count)
                     tb_writer.add_scalar("train/qk_grads_av", accum_qk, batch_count)
                     tb_writer.add_scalar("train/grad_norm", accum_norm, batch_count)
-                    accum_loss = 0.0; accum_mse = 0.0; accum_qk = 0.0; accum_norm = 0.0
-                    tb_writer.add_scalar("train/epoch_progress", epoch_count / ebs_steps_per_epoch,  batch_count)
+                    accum_loss = 0.0
+                    accum_mse = 0.0
+                    accum_qk = 0.0
+                    accum_norm = 0.0
+                    tb_writer.add_scalar("train/epoch_progress", epoch_count / ebs_steps_per_epoch, batch_count)
                 except Exception as e:
                     print("Error logging to tensorboard")
-
-
 
             if args.gradient_clip is not None and args.gradient_clip > 0:
                 accelerator.clip_grad_norm_(unet.parameters(), args.gradient_clip)
@@ -704,10 +697,10 @@ def main():
         # We have to take into account gradient accumilation!!
         # This is one reason it has to default to "1", not "0"
         if global_step % args.gradient_accum == 0:
-            optim.step();
+            optim.step()
             optim.zero_grad()
             if not args.scheduler_at_epoch:
-                lr_sched.step();
+                lr_sched.step()
             pbar.update(1)
             batch_count += 1
 
@@ -732,8 +725,6 @@ def main():
     ###################################################
     #     end of def train_micro_batch()
     ###################################################
-
-
 
     # ----- training loop --------------------------------------------------- #
     """ Old way
@@ -760,7 +751,6 @@ def main():
                     dynamic_ncols=True,
                     leave=True)
 
-
         # "batch" is actually micro-batch
         # yes this will stop at end of shortest dataset.
         # Every dataset will get equal value. I'm not messing around with
@@ -770,7 +760,7 @@ def main():
                 break
             step, batch = next(mix_iter)
 
-            train_micro_batch(unet, batch) # this bumps batch_count only for EBS size
+            train_micro_batch(unet, batch)  # this bumps batch_count only for EBS size
 
         pbar.close()
         if batch_count >= max_steps:
@@ -786,6 +776,7 @@ def main():
             print(f"finished:model saved to {args.output_dir}")
         else:
             checkpointandsave()
+
 
 if __name__ == "__main__":
     try:
