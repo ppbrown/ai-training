@@ -38,16 +38,16 @@ class CaptionImgDataset(Dataset):
                     img_cache = p.with_suffix(imgcache_suffix)
                     txt_cache = p.with_suffix(txtcache_suffix)
                     # Only keep samples where BOTH caches exist
-                    if img_cache.exists():
+                    if p.exists() and img_cache.exists():
                         if unsupervised or txt_cache.exists():
                             self.files.append((img_cache, txt_cache))
                             subtotal+=1
             print(f"Cache pairs found: {subtotal}")
 
         if not self.files:
-            raise RuntimeError("No valid cache pairs found! " \
-                    "Did you run your cache pre-processing script?\n" \
-                    f"{root_dirs}")
+            raise RuntimeError("No valid cache pairs found! "
+                               "Did you run your cache pre-processing script?\n"
+                               f"{root_dirs}")
 
         print(f"Total cache pairs found: {len(self.files)}")
 
