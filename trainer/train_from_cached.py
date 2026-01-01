@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 
-# train_with_caching.py
+# train_from_cached.py
 
 
 # --------------------------------------------------------------------------- #
 # 1. CLI                                                                      #
 # --------------------------------------------------------------------------- #
-import argparse
 
 from train_args import parse_args
 from train_multiloader import InfiniteLoader
@@ -17,19 +16,21 @@ args = parse_args()
 # --------------------------------------------------------------------------- #
 
 import os, math, shutil
-from itertools import chain
 from pathlib import Path
 from tqdm.auto import tqdm
 
 import torch
 import safetensors.torch as st
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from accelerate import Accelerator, DistributedDataParallelKwargs
-from diffusers import DiffusionPipeline, UNet2DConditionModel
-from diffusers import DDPMScheduler, PNDMScheduler
-from diffusers.models.attention import Attention as CrossAttention
+from diffusers import DiffusionPipeline
+
 from diffusers.training_utils import compute_snr
+
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
+# from pytorch_optimizer.lr_scheduler.rex import REXScheduler - this is not compatible
+from axolotl.utils.schedulers import RexLR
 
 # diffusers optimizers dont have a min_lr arg,
 # so dont use that scheduler
@@ -39,6 +40,7 @@ from transformers import get_scheduler
 from torch.utils.tensorboard import SummaryWriter
 
 import lion_pytorch
+from optimi import Lion  # torch-optimi pip module
 
 # Speed boost for fp32 training.
 # We give up "strict fp32 math", for an alleged negligable
@@ -212,7 +214,7 @@ def main():
 
     if args.unfreeze_attn2:
         from train_reinit import unfreeze_attn2
-        unfreeze_attn2(pipe.unet, reset=False)
+        unfreeze_attn2(pipe.unet)
 
     if args.unfreeze_up_blocks:
         print(f"Attempting to unfreeze (({args.unfreeze_up_blocks}))"
@@ -355,13 +357,11 @@ def main():
         **({'d0': args.initial_d} if args.initial_d else {}),
     }
     if args.optimizer == "py_lion":
-        import lion_pytorch
         optim = lion_pytorch.Lion(trainable_params,
                                   lr=peak_lr,
                                   **opt_args
                                   )
     elif args.optimizer == "opt_lion":
-        from optimi import Lion  # torch-optimi pip module
         optim = Lion(trainable_params,
                      lr=peak_lr,
                      **opt_args
@@ -435,10 +435,6 @@ def main():
         print(f"  Setting num_cycles to {args.num_cycles}")
 
     if args.scheduler.lower() == "rex":
-        from torch.optim.lr_scheduler import LinearLR, SequentialLR
-        # from pytorch_optimizer.lr_scheduler.rex import REXScheduler - this is not compatible
-        from axolotl.utils.schedulers import RexLR
-
         rex = RexLR(
             optim,
             total_steps=max_steps - warmup_steps,
@@ -552,8 +548,9 @@ def main():
                 if args.force_txtcache:
                     cache_file = args.force_txtcache
                 if Path(cache_file).suffix == ".h5":
-                    arr = h5f["emb"][:]
-                    emb = torch.from_numpy(arr)
+                    raise NotImplementedError(cache_file, "not supported yet")
+                    # arr = h5f["emb"][:]
+                    # emb = torch.from_numpy(arr)
                 else:
                     try:
                         emb = st.load_file(cache_file)["emb"]
