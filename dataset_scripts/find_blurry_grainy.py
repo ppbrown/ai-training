@@ -180,6 +180,7 @@ def main() -> None:
         for p in iter_jpegs(Path(root)):
             print_it = False
 
+            # noinspection PyBroadException
             try:
                 with Image.open(p) as im:
                     w, h = im.size
@@ -200,8 +201,7 @@ def main() -> None:
                     print_it = True
 
             except Exception:
-                if args.blurry:
-                    print_it = True
+                print_it = True  # print out "bad" filename
 
             if print_it:
                 print(str(p))
