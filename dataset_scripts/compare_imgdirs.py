@@ -8,12 +8,13 @@ This makes it easier to check if current run is better or worse than previous on
 
 import sys, os, argparse
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QHBoxLayout, QMessageBox, QGridLayout
+    QApplication, QWidget, QLabel, QMessageBox, QGridLayout
 )
 from PySide6.QtGui import QPixmap, QKeyEvent
 from PySide6.QtCore import Qt
 
 VALID_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+
 
 def find_images_recursive(folder):
     image_files = []
@@ -25,6 +26,7 @@ def find_images_recursive(folder):
                 image_files.append((rel_path, full_path))
     image_files.sort()
     return image_files
+
 
 class ImageCompareViewer(QWidget):
     def __init__(self, folder1, folder2, folder3=None, skip=0):
@@ -49,14 +51,14 @@ class ImageCompareViewer(QWidget):
             common_keys &= set(k for k, _ in images3)
         common_keys = sorted(common_keys)
 
-        self.pairs = [(dict(images1)[k], 
-                       dict(images2)[k], 
+        self.pairs = [(dict(images1)[k],
+                       dict(images2)[k],
                        dict(images3)[k] if images3 else None) for k in common_keys]
 
         self.max_index = len(self.pairs)
         self.index = skip
         if self.index >= self.max_index:
-           self.index = self.max_index - 1
+            self.index = self.max_index - 1
 
         def makelabel(ndx: int):
             label1 = QLabel(f"Folder {ndx}")
@@ -92,6 +94,7 @@ class ImageCompareViewer(QWidget):
             x = max(0, (pixmap.width() - 512) // 2)
             y = max(0, (pixmap.height() - 512) // 2)
             return pixmap.copy(x, y, 512, 512)
+
         ######
 
         if 0 <= self.index < self.max_index:
@@ -101,12 +104,11 @@ class ImageCompareViewer(QWidget):
             if img3:
                 self.label3.setPixmap(prepare_pixmap(img3))
 
-            #basename = os.path.basename(self.pairs[self.index][0])
+            # basename = os.path.basename(self.pairs[self.index][0])
             basename = self.pairs[self.index][0].removeprefix(self.folder1)
-            self.setWindowTitle(f"[{self.index+1}/{self.max_index}] {basename}")
+            self.setWindowTitle(f"[{self.index + 1}/{self.max_index}] {basename}")
         else:
             QMessageBox.warning(self, "Out of range", "No more images.")
-
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
@@ -118,6 +120,7 @@ class ImageCompareViewer(QWidget):
             self.update_images()
         elif key == Qt.Key_Escape or key == Qt.Key_Q:
             self.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Recursively compare image folders side-by-side.")
@@ -131,16 +134,17 @@ def main():
         print("Error: One or both paths are not valid directories.")
         sys.exit(1)
     print("", args.folder1, "\n", args.folder2,
-            f"\n{args.folder3}" if args.folder3 else "")
+          f"\n{args.folder3}" if args.folder3 else "")
 
     app = QApplication(sys.argv)
     viewer = ImageCompareViewer(
-            args.folder1, 
-            args.folder2,
-            args.folder3 if args.folder3 else None,
-            args.skip)
+        args.folder1,
+        args.folder2,
+        args.folder3 if args.folder3 else None,
+        args.skip)
     viewer.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
