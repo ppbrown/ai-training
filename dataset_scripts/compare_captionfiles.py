@@ -11,8 +11,7 @@ import os
 import argparse
 from pathlib import Path
 
-
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextOption, QPixmap, QShortcut
 from PySide6.QtWidgets import (
@@ -20,11 +19,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QPushButton, QStatusBar
 )
 
-def find_triplets(root: Path):
+
+def find_triplets(args):
     """
     Yield (jpg_path, txt_path, moon_path) for files sharing the same stem.
     Only '.jpg' is considered for the image extension as requested.
     """
+    root = args.folder
     root = root.resolve()
     # Map of stem -> list of suffixes present
     stems = {}
@@ -44,6 +45,7 @@ def find_triplets(root: Path):
                 d / f"{stem}{args.suffix1}",
                 d / f"{stem}{args.suffix2}",
             )
+
 
 class Viewer(QMainWindow):
     def __init__(self, triplets):
@@ -112,10 +114,10 @@ class Viewer(QMainWindow):
 
         # Global key shortcuts (active whenever the window is active)
         QShortcut(Qt.Key_Right, self, activated=self.next_item)
-        QShortcut(Qt.Key_Down,  self, activated=self.next_item)
-        QShortcut(Qt.Key_Left,  self, activated=self.prev_item)
-        QShortcut(Qt.Key_Up,    self, activated=self.prev_item)
-        QShortcut(Qt.Key_Q,    self, activated=self.quit)
+        QShortcut(Qt.Key_Down, self, activated=self.next_item)
+        QShortcut(Qt.Key_Left, self, activated=self.prev_item)
+        QShortcut(Qt.Key_Up, self, activated=self.prev_item)
+        QShortcut(Qt.Key_Q, self, activated=self.quit)
 
     def _make_text_box(self, height: int) -> QTextEdit:
         te = QTextEdit()
@@ -188,14 +190,14 @@ def main():
     parser.add_argument("folder", help="Directory with images and matching caption files")
     args = parser.parse_args()
 
-    triplets = list(find_triplets(args.folder))
-
+    triplets = list(find_triplets(args))
 
     app = QApplication(sys.argv)
     win = Viewer(triplets)
     win.resize(512 + 8 + 512, 700)  # a reasonable starting size
     win.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
