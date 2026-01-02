@@ -46,7 +46,7 @@ def find_matching_object(data_list, url):
             return obj
     return None
 
-def main(jsonl_file,caption_field):
+def main(jsonl_file, caption_field):
     # Read the JSONL data
     data_list = read_jsonl(jsonl_file)
     print("Read ",jsonl_file)
@@ -93,8 +93,7 @@ if __name__ == "__main__":
         print("Usage: python script.py <jsonl_file> <caption field name>", file=sys.stderr)
         sys.exit(1)
 
-    jsonl_file = sys.argv[1]
-    caption_field = sys.argv[2]
-    main(jsonl_file,caption_field)
+
+    main(jsonl_file=sys.argv[1], caption_field=sys.argv[2])
 
 
