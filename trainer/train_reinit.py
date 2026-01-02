@@ -50,7 +50,6 @@ def reinit_qk(unet, *, method: str = "xavier", sigma: float = 0.1) -> None:
     if method.lower() == "all":
         print("ERROR: should not be calling reinit_qk with 'all' mode")
         exit(1)
-        return
 
     hard = method.lower() == "xavier"
     affected = 0
@@ -117,7 +116,6 @@ def reinit_cross_attention_outproj(model):
     Call once on a fresh run (NOT when resuming).
     """
     affected = 0
-    hits_w = hits_b = 0
     with torch.no_grad():
         for name, p in model.named_parameters():
             if ".attn2.to_out." in name and (name.endswith(".weight") or name.endswith(".bias")):
@@ -356,9 +354,9 @@ def unfreeze_norms(unet, *, include_bias: bool = True) -> int:
     Returns:
         Count of tensors whose requires_grad was changed.
     """
-    def _is_norm(mod: nn.Module) -> bool:
+    def _is_norm(mod_to_check: nn.Module) -> bool:
         # Catch both standard nn.*Norm and custom Diffusers norms (class name contains "Norm")
-        return isinstance(mod, _NORM_TYPES) or ("Norm" in mod.__class__.__name__)
+        return isinstance(mod_to_check, _NORM_TYPES) or ("Norm" in mod_to_check.__class__.__name__)
 
     toggled = 0
     for name, mod in unet.named_modules():
@@ -371,8 +369,8 @@ def unfreeze_norms(unet, *, include_bias: bool = True) -> int:
                 toggled += 1
     return toggled
 def unfreeze_all_attention(unet):
-    def is_attn(m):
-        n = m.__class__.__name__
+    def is_attn(mod_to_check):
+        n = mod_to_check.__class__.__name__
         return ("Attention" in n) or ("Transformer" in n)
     # freeze all first
     for p in unet.parameters(): p.requires_grad = False
