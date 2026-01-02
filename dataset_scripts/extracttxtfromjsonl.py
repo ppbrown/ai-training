@@ -1,9 +1,14 @@
 #!/bin/env python
 
 """
-python program that is given the name of jsonl file and caption field as arguments.
-Reads in all the json data from the jsonl file..
-Then processes a list of .json files in stdin.
+python program to extract field from a jsonl file and save as txt files.
+
+Pass it name of jsonl or jsonl.gz file and caption field as arguments.
+Feed it a list of json files on stdin.
+
+DETAILS:
+Will reads in all the json data from the jsonl file,
+then processes the list of .json files in stdin.
 Rreads in "url" from the .json file
 Finds matching object from original jsonl file
 Extracts the field matching the caption field from object
