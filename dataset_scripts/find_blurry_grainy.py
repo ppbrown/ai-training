@@ -16,6 +16,7 @@ Default grainy values are somewhat permissive. I may use
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -172,6 +173,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.blurry: print("Detecting blur", file=sys.stderr)
+    if args.grainy: print("Detecting grainy", file=sys.stderr)
 
     for root in args.roots:
         for p in iter_jpegs(Path(root)):
