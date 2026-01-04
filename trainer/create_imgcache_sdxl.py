@@ -72,7 +72,12 @@ def find_images(input_dir, exts):
 def make_cover_resize_center_crop(w: int, h: int):
     def _f(img):
         H, W = img.height, img.width
-        scalefactor = h / H
+        if w > h:
+            scalefactor = h / H
+        elif h > w:
+            scalefactor = w / W
+        else:
+            scalefactor = 1
         newH, newW = round(H*scalefactor), round(W*scalefactor)
         img = F.resize(img, (newH, newW), interpolation=IM.BICUBIC, antialias=True)
         return F.center_crop(img, (h, w))
