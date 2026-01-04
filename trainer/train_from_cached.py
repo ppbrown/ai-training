@@ -378,9 +378,9 @@ def main():
         "optimizer": optim,
         "num_warmup_steps": warmup_steps,
         "num_training_steps": max_steps,
+        "scheduler_specific_kwargs": {},
     }
 
-    scheduler_args["scheduler_specific_kwargs"] = {}
     if args.scheduler == "cosine_with_min_lr":
         scheduler_args["scheduler_specific_kwargs"]["min_lr_rate"] = args.min_lr_ratio
         print(f"  Setting min_lr_ratio to {args.min_lr_ratio}")
