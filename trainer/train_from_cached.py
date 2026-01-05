@@ -456,7 +456,7 @@ def main():
         pipe.save_pretrained(ckpt_dir, safe_serialization=True)
         pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
         if args.sample_prompt is not None:
-            sample_img(args.sample_prompt, args.seed, ckpt_dir,
+            sample_img(args, args.seed, ckpt_dir,
                        custom_pipeline)
         if args.copy_config:
             savefile = os.path.join(args.output_dir, args.copy_config)
@@ -723,7 +723,7 @@ def main():
             tb_writer.close()
         if False:
             pipe.save_pretrained(args.output_dir, safe_serialization=True)
-            sample_img(args.sample_prompt, args.seed, args.output_dir,
+            sample_img(args, args.seed, args.output_dir,
                        custom_pipeline)
             print(f"finished:model saved to {args.output_dir}")
         else:

@@ -1,3 +1,9 @@
+from tqdm.auto import tqdm
+from diffusers import DiffusionPipeline
+import torch
+
+
+
 def collate_fn(examples):
     return {
         "img_cache": [e["img_cache"] for e in examples],
@@ -6,7 +12,8 @@ def collate_fn(examples):
 
 
 # PIPELINE_CODE_DIR is typicaly the dir of original model
-def sample_img(prompt, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
+def sample_img(args, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
+    prompt = args.sample_prompt
     tqdm.write(f"Trying render of '{prompt}' using seed {seed} ..")
     pipe = DiffusionPipeline.from_pretrained(
         CHECKPOINT_DIR,
@@ -42,5 +49,3 @@ def log_unet_l2_norm(unet, tb_writer, step):
     all_params = torch.cat(params)
     l2_norm = torch.norm(all_params, p=2).item()
     tb_writer.add_scalar('unet/L2_norm', l2_norm, step)
-
-
