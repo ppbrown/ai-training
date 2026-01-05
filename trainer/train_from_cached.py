@@ -711,8 +711,12 @@ def main():
             if batch_count >= max_steps:
                 break
             step, batch = next(mix_iter)
-
-            train_micro_batch(unet, batch)  # this bumps batch_count only for EBS size
+            try:
+                # this bumps batch_count only for EBS size
+                train_micro_batch(unet, batch)
+            except torch.OutOfMemoryError as e:
+                print("OUT OF VRAM Problem in Batch", batch)
+                exit(0)
 
         pbar.close()
         if batch_count >= max_steps:
