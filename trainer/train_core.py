@@ -1,4 +1,3 @@
-
 # train_core.py
 
 """
@@ -6,7 +5,6 @@ Contains the "main loop" for training
 """
 
 from train_state import TrainState
-from train_grad_topk import sparsify_sd15_gradients
 
 from pathlib import Path
 import torch
@@ -19,7 +17,8 @@ from diffusers.training_utils import compute_snr
 #######################################################
 #    Core training code. Very Long!!                  #
 #######################################################
-def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: TrainState):
+def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: TrainState,
+                      optim, lr_sched, ebs_steps_per_epoch):
     args = tstate.args
     noise_sched = tstate.noise_sched
 
@@ -126,6 +125,7 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
         accelerator.wait_for_everyone()
         accelerator.backward(loss)
         if args.gradient_topk:
+            from train_grad_topk import sparsify_sd15_gradients
             sparsify_sd15_gradients(unet, keep_frac=args.gradient_topk)
 
     # -----logging & ckp save  ----------------------------------------- #
@@ -145,15 +145,13 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             tstate.accum_mse += raw_mse_loss.item()
 
         tstate.pbar.set_description_str((
-            f"E{tstate.epoch_count}/{total_epochs}"
-            f"({tstate.batch_count:05})"  # PROBLEM HERE
+            f"E{tstate.epoch_count}/{tstate.total_epochs}"
+            f"({tstate.batch_count:05})"
         ))
         tstate.pbar.set_postfix_str((f" l: {loss.item():.3f}"
-                              f" raw: {raw_mse_loss.item():.3f}"
-                              f" lr: {current_lr:.1e}"
-                              # f" qk: {qk_grad_sum:.1e}"
-                              # f" gr: {total_norm:.1e}"
-                              ))
+                                     f" raw: {raw_mse_loss.item():.3f}"
+                                     f" lr: {current_lr:.1e}"
+                                     ))
 
     # Accelerate will make sure this only gets called on full-batch boundaries
     if accelerator.sync_gradients:
@@ -170,7 +168,6 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
 
         try:
             if tstate.tb_writer is not None:
-
                 tstate.tb_writer.add_scalar("train/learning_rate", current_lr, tstate.batch_count)
                 if args.use_snr:
                     tstate.tb_writer.add_scalar("train/loss_snr", tstate.accum_loss / args.gradient_accum, tstate.batch_count)
@@ -198,7 +195,6 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             lr_sched.step()
         tstate.pbar.update(1)
         tstate.batch_count += 1
-
 
 
 ###################################################
