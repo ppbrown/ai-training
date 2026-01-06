@@ -9,6 +9,7 @@
 
 from train_args import parse_args
 from train_multiloader import InfiniteLoader
+from trainer.train_checkpointandsave import checkpointandsave
 
 # Put this super-early, so that usage message procs fast
 args = parse_args()
@@ -16,11 +17,9 @@ args = parse_args()
 from train_state import TrainState
 from train_core import train_micro_batch
 
-
 # --------------------------------------------------------------------------- #
 
-import os, math, shutil
-from pathlib import Path
+import os, math
 from tqdm.auto import tqdm
 
 import torch
@@ -28,7 +27,6 @@ from torch.utils.data import DataLoader
 
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from diffusers import DiffusionPipeline
-
 
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 # from pytorch_optimizer.lr_scheduler.rex import REXScheduler - this is not compatible
@@ -60,7 +58,11 @@ torch.backends.cudnn.benchmark = True
 
 from train_captiondata import CaptionImgDataset
 
-from train_utils import collate_fn, sample_img, log_unet_l2_norm
+from train_utils import collate_fn, sample_img
+
+
+# --------------------------------------------- #
+
 
 #####################################################
 # Main                                              #
@@ -252,7 +254,6 @@ def main():
 
     # ----- load data, set training params ------------------------------------------------ #
 
-
     bs = args.batch_size
     accum = args.gradient_accum
     effective_batch_size = bs * accum
@@ -430,9 +431,12 @@ def main():
 
     lr_sched = accelerator.prepare(lr_sched)
 
-
-
-    tstate = TrainState()
+    tstate = TrainState(args=args,
+                        device=device,
+                        compute_dtype=compute_dtype,
+                        latent_scaling=latent_scaling,
+                        noise_sched=noise_sched,
+                        )
 
     ## These are now all bundled into tstate, and
     ##   initialized there
@@ -447,43 +451,7 @@ def main():
     run_name = os.path.basename(args.output_dir)
     tstate.tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/", run_name))
 
-    def checkpointandsave():
-        if tstate.global_step % args.gradient_accum != 0:
-            print("INTERNAL ERROR: checkpointandsave() not called on clean step")
-            return
 
-        ckpt_dir = os.path.join(args.output_dir,
-                                f"checkpoint-{tstate.batch_count:05}")
-        if os.path.exists(ckpt_dir):
-            print(f"Checkpoint {ckpt_dir} already exists. Skipping redundant save")
-            return
-        pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
-        pipe.unet = accelerator.unwrap_model(unet)
-        log_unet_l2_norm(pipe.unet, tstate.tb_writer, tstate.batch_count)
-
-        print(f"Saving checkpoint to {ckpt_dir}")
-        pipe.save_pretrained(ckpt_dir, safe_serialization=True)
-        pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
-        if args.sample_prompt is not None:
-            sample_img(args, args.seed, ckpt_dir,
-                       custom_pipeline)
-        if args.copy_config:
-            savefile = os.path.join(args.output_dir, args.copy_config)
-            if not os.path.exists(savefile):
-                tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
-                shutil.copy(args.copy_config, args.output_dir)
-
-                import yaml
-                savefile = os.path.join(args.output_dir, "args.yaml")
-                tqdm.write(f"Saving commandline to  {savefile}")
-                Path(savefile).write_text(yaml.safe_dump(vars(args), sort_keys=True))
-
-        savefile = os.path.join(ckpt_dir, "tstate.latent_paths")
-        with open(savefile, "w") as f:
-            f.write('\n'.join(tstate.latent_paths) + '\n')
-            f.close()
-        print("Wrote", len(tstate.latent_paths), "loglines to", savefile)
-        tstate.latent_paths = []
 
     #
     # ----- training loop --------------------------------------------------- #
@@ -506,10 +474,10 @@ def main():
             lr_sched.step(tstate.batch_count)
 
         tstate.pbar = tqdm(range(ebs_steps_per_epoch),
-                    desc=f"E{epoch_count}/{total_epochs}",
-                    bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
-                    dynamic_ncols=True,
-                    leave=True)
+                           desc=f"E{epoch_count}/{total_epochs}",
+                           bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
+                           dynamic_ncols=True,
+                           leave=True)
 
         # "batch" is actually micro-batch
         # yes this will stop at end of shortest dataset.
@@ -526,10 +494,31 @@ def main():
                 print("OUT OF VRAM Problem in Batch:", batch_paths)
                 exit(0)
 
+
+            # Now save if trigger present, OR if right stepcount
+            trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+            if os.path.exists(trigger_path):
+                print("trigger.checkpoint detected. ...")
+                # It is tempting to put this in the same place as the other save.
+                # But, we want to include this one in the
+                #   "did we complete a full batch?"
+                # logic
+                checkpointandsave()
+                try:
+                    os.remove(trigger_path)
+                except Exception as e:
+                    print("warning: got exception", e)
+
+            elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
+                if tstate.batch_count >= int(args.save_start):
+                    print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
+                    checkpointandsave()
+
         tstate.pbar.close()
         if tstate.batch_count >= max_steps:
             break
 
+    # End of epoch. Save if appropriate
     if accelerator.is_main_process:
         if tstate.tb_writer is not None:
             tstate.tb_writer.close()

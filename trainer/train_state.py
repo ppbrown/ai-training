@@ -4,12 +4,25 @@ Used to pass values between train_from_cached.py and
 train_core.py
 """
 from dataclasses import dataclass, field
+from typing import Any
+
+import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
+import argparse
 
 @dataclass
 class TrainState:
+    # Expected init values
+    args: argparse.Namespace
+    compute_dtype:  Any
+    device: torch.device
+    latent_scaling: float
+    noise_sched:  Any  # torch._inductor.scheduler.SchedulerBuffer
+
+
+
     # step counters
     global_step: int = 0           # micro-batch count
     batch_count: int = 0           # effective-batch-size count (optimizer steps)
