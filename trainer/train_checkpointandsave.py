@@ -2,13 +2,13 @@ import os
 import shutil
 from pathlib import Path
 
-from tqdm.asyncio import tqdm
+from tqdm.auto import tqdm
 
 from train_state import TrainState
 from trainer.train_utils import sample_img
 
 
-def checkpointandsave(unet, pipe, accelerator, tstate: TrainState):
+def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
     args = tstate.args
 
     if args.is_custom:
