@@ -5,7 +5,7 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 from train_state import TrainState
-from trainer.train_utils import sample_img
+from train_utils import sample_img
 
 
 def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
