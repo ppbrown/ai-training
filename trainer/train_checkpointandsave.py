@@ -47,7 +47,7 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
             tqdm.write(f"Saving commandline to  {savefile}")
             Path(savefile).write_text(yaml.safe_dump(vars(args), sort_keys=True))
 
-    savefile = os.path.join(ckpt_dir, "tstate.latent_paths")
+    savefile = os.path.join(ckpt_dir, "latent_paths")
     with open(savefile, "w") as f:
         f.write('\n'.join(tstate.latent_paths) + '\n')
         f.close()
