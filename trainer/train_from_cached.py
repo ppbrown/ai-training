@@ -478,19 +478,20 @@ def main():
                 exit(0)
 
             # Now save if trigger present, OR if right stepcount
-            trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
-            if os.path.exists(trigger_path):
-                print("trigger.checkpoint detected. ...")
-                checkpointandsave(pipe, unet, accelerator, tstate)
-                try:
-                    os.remove(trigger_path)
-                except Exception as e:
-                    print("warning: got exception", e)
-
-            elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
-                if tstate.batch_count >= int(args.save_start):
-                    print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
+            if tstate.global_step % args.gradient_accum == 0:
+                trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+                if os.path.exists(trigger_path):
+                    print("trigger.checkpoint detected. ...")
                     checkpointandsave(pipe, unet, accelerator, tstate)
+                    try:
+                        os.remove(trigger_path)
+                    except Exception as e:
+                        print("warning: got exception", e)
+
+                elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
+                    if tstate.batch_count > 0 and tstate.batch_count >= int(args.save_start):
+                        print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
+                        checkpointandsave(pipe, unet, accelerator, tstate)
 
         tstate.pbar.close()
         if tstate.batch_count >= max_steps:
