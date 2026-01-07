@@ -9,13 +9,13 @@
 
 from train_args import parse_args
 from train_multiloader import InfiniteLoader
-from trainer.train_checkpointandsave import checkpointandsave
 
 # Put this super-early, so that usage message procs fast
 args = parse_args()
 
 from train_state import TrainState
 from train_core import train_micro_batch
+from train_checkpointandsave import checkpointandsave
 
 # --------------------------------------------------------------------------- #
 
@@ -58,10 +58,7 @@ torch.backends.cudnn.benchmark = True
 
 from train_captiondata import CaptionImgDataset
 
-from train_utils import collate_fn, sample_img
-
-
-# --------------------------------------------- #
+from train_utils import collate_fn, sample_img, log_unet_l2_norm
 
 
 #####################################################
@@ -84,7 +81,7 @@ def main():
     )
     device = accelerator.device
 
-    # ----- read arguments and load pipeline -------------- #
+    # ----- load pipeline --------------------------------------------------- #
 
     if args.is_custom:
         custom_pipeline = args.pretrained_model
@@ -103,6 +100,7 @@ def main():
         print(e)
         exit(0)
 
+    # -- unet trainable selection -- #
     if args.targetted_training:
         print("Limiting Unet training to targetted area(s)")
         pipe.unet.requires_grad_(False)
@@ -438,43 +436,27 @@ def main():
                         noise_sched=noise_sched,
                         )
 
-    ## These are now all bundled into tstate, and
-    ##   initialized there
-    ## global_step = 0  # micro-batch count
-    ## batch_count = 0  # effective-batch-size count, aka num of fullsize batches
-    ## accum_loss = 0.0
-    ## accum_mse = 0.0
-    ## accum_qk = 0.0
-    ## accum_norm = 0.0
-    ## latent_paths = []
-
     run_name = os.path.basename(args.output_dir)
     tstate.tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/", run_name))
 
-
-
     #
     # ----- training loop --------------------------------------------------- #
-    """ Old way
-    ebar = tqdm(range(math.ceil(max_steps / len(dl))),
-                desc="Epoch", unit="", dynamic_ncols=True,
-                position=0,
-                leave=True)
-    """
 
-    total_epochs = math.ceil(max_steps / ebs_steps_per_epoch)
+    tstate.total_epochs = math.ceil(max_steps / ebs_steps_per_epoch)
     mix_iter = iter(mix_loader)
 
-    for epoch_count in range(total_epochs):
+    for epoch_count in range(tstate.total_epochs):
+        tstate.epoch_count = epoch_count
+
         if args.save_on_epoch:
-            checkpointandsave()
+            checkpointandsave(pipe, unet, accelerator, tstate)
 
         if args.scheduler_at_epoch:
             # Implement a stair-stepped decay, updating on epoch to what the smooth would be at this point
             lr_sched.step(tstate.batch_count)
 
         tstate.pbar = tqdm(range(ebs_steps_per_epoch),
-                           desc=f"E{epoch_count}/{total_epochs}",
+                           desc=f"E{epoch_count}/{tstate.total_epochs}",
                            bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
                            dynamic_ncols=True,
                            leave=True)
@@ -489,21 +471,17 @@ def main():
             step, batch_paths = next(mix_iter)
             try:
                 # this bumps tstate.batch_count only for EBS size
-                train_micro_batch(unet, accelerator, batch_paths, tstate)
+                train_micro_batch(unet, accelerator, batch_paths, tstate,
+                                  optim, lr_sched, ebs_steps_per_epoch)
             except torch.OutOfMemoryError:
                 print("OUT OF VRAM Problem in Batch:", batch_paths)
                 exit(0)
-
 
             # Now save if trigger present, OR if right stepcount
             trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
             if os.path.exists(trigger_path):
                 print("trigger.checkpoint detected. ...")
-                # It is tempting to put this in the same place as the other save.
-                # But, we want to include this one in the
-                #   "did we complete a full batch?"
-                # logic
-                checkpointandsave()
+                checkpointandsave(pipe, unet, accelerator, tstate)
                 try:
                     os.remove(trigger_path)
                 except Exception as e:
@@ -512,13 +490,12 @@ def main():
             elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
                 if tstate.batch_count >= int(args.save_start):
                     print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
-                    checkpointandsave()
+                    checkpointandsave(pipe, unet, accelerator, tstate)
 
         tstate.pbar.close()
         if tstate.batch_count >= max_steps:
             break
 
-    # End of epoch. Save if appropriate
     if accelerator.is_main_process:
         if tstate.tb_writer is not None:
             tstate.tb_writer.close()
@@ -528,7 +505,7 @@ def main():
                        custom_pipeline)
             print(f"finished:model saved to {args.output_dir}")
         else:
-            checkpointandsave()
+            checkpointandsave(pipe, unet, accelerator, tstate)
 
 
 if __name__ == "__main__":
