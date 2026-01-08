@@ -58,7 +58,7 @@ torch.backends.cudnn.benchmark = True
 
 from train_captiondata import CaptionImgDataset
 
-from train_utils import collate_fn, sample_img, log_unet_l2_norm
+from train_utils import collate_fn, sample_img
 
 
 #####################################################
@@ -305,6 +305,7 @@ def main():
         warmup_steps = warmup_steps * ebs_steps_per_epoch
     else:
         warmup_steps = int(args.warmup_steps)
+
 
     # Common args that may or may not be defined
     # Allow fall-back to optimizer-specific defaults

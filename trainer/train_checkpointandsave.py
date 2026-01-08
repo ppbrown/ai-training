@@ -5,7 +5,7 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 from train_state import TrainState
-from train_utils import sample_img
+from train_utils import sample_img, log_unet_l2_norm
 
 
 def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
@@ -19,6 +19,7 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
     if tstate.global_step % args.gradient_accum != 0:
         print("INTERNAL ERROR: checkpointandsave() not called on clean step")
         return
+    log_unet_l2_norm(unet, tstate.tb_writer, tstate.batch_count)
 
     ckpt_dir = os.path.join(args.output_dir,
                             f"checkpoint-{tstate.batch_count:05}")
@@ -28,7 +29,7 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
     pinned_te, pinned_unet = pipe.text_encoder, pipe.unet
     pipe.unet = accelerator.unwrap_model(unet)
 
-    # log_unet_l2_norm(pipe.unet, tstate.tb_writer, tstate.batch_count)
+
 
     print(f"Saving checkpoint to {ckpt_dir}")
     pipe.save_pretrained(ckpt_dir, safe_serialization=True)
