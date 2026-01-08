@@ -29,8 +29,8 @@ def parse_args():
     p.add_argument("--output_dir",     required=True)
 
     p.add_argument("--batch_size",     type=int, default=4)
-    p.add_argument("--warmup_steps",   default=0, 
-                   help="Measured in effective batchsize steps (b * a) default=0")
+    p.add_argument("--warmup_steps",   type=str, default="0",
+                   help="Measured in effective batchsize steps (b * a). Default=0")
     p.add_argument("--max_steps",      default=10_000, 
                    help="Maximum EFFECTIVE BATCHSIZE steps(b * accum) default=10_000. May use '2e' for whole epochs")
     p.add_argument("--save_steps",     type=int, help="Measured in effective batchsize(b * a)")
