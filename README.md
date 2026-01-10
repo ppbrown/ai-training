@@ -35,6 +35,3 @@ The primary features I like about my own scripts are:
 * Currently, only SD1.5 unet supported
 
 * Currently, Only "diffusers" format supported
-
-* The tensor caches are not compressed. This can be a space issue for things like T5,
-which end up making very large text embedding files. Not a problem for CLIP cache files.
