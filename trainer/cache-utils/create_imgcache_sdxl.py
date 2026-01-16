@@ -72,9 +72,9 @@ def find_images(input_dir, exts):
 def make_cover_resize_center_crop(w: int, h: int):
     def _f(img):
         H, W = img.height, img.width
-        if w > h:
+        if W > H:
             scalefactor = h / H
-        elif h > w:
+        elif H > W:
             scalefactor = w / W
         else:
             scalefactor = 1
