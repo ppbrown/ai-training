@@ -6,6 +6,11 @@
 #   - Prev: Left / p
 #   - Quit: q / Esc
 
+import sys
+device = "cpu"  # or: torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device, file=sys.stderr)
+# I want this to print FAST, so before other imports
+
 import argparse
 from pathlib import Path
 
@@ -19,9 +24,6 @@ from PIL import ImageTk
 
 
 # ---- config ----
-device = "cpu"  # or: torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -80,23 +82,33 @@ class Viewer:
         root.bind("<Escape>", self.quit)
 
         self._photo = None  # keep reference
+        self._normal_cursor = root.cget("cursor")
         self.show_current()
 
+    def _set_busy_cursor(self, busy: bool) -> None:
+        self.root.configure(cursor="watch" if busy else self._normal_cursor)
+        # Force the cursor change to appear immediately
+        self.root.update_idletasks()
+
     def show_current(self):
-        file_path = self.files[self.idx]
-        pil_img, latent_shape = decode_latent_to_pil(self.vae_model, file_path)
+        self._set_busy_cursor(True)
+        try:
+            file_path = self.files[self.idx]
+            pil_img, latent_shape = decode_latent_to_pil(self.vae_model, file_path)
 
-        # Convert to Tk image
-        self._photo = ImageTk.PhotoImage(pil_img)
-        self.label.configure(image=self._photo)
+            # Convert to Tk image
+            self._photo = ImageTk.PhotoImage(pil_img)
+            self.label.configure(image=self._photo)
 
-        # Title bar shows filename
-        title = f"{Path(file_path).name}  ({self.idx + 1}/{len(self.files)})"
-        self.root.title(title)
+            # Title bar shows filename
+            title = f"{Path(file_path).name}  ({self.idx + 1}/{len(self.files)})"
+            self.root.title(title)
 
-        self.status.configure(
-            text=f"File: {file_path}\nLatent shape: {latent_shape}\nKeys: Next=Right/Space/n  Prev=Left/p  Quit=q/Esc"
-        )
+            self.status.configure(
+                text=f"File: {file_path}\nLatent shape: {latent_shape}\nKeys: Next=Right/Space/n  Prev=Left/p  Quit=q/Esc"
+            )
+        finally:
+            self._set_busy_cursor(False)
 
     def next_image(self, _event=None):
         self.idx = (self.idx + 1) % len(self.files)
