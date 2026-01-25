@@ -67,13 +67,13 @@ def find_images(input_dir, exts):
 
 # Resize to height, while preserving aspect ratio.
 # Then crop to width
-def make_cover_resize_center_crop(w: int, h: int):
+def make_cover_resize_center_crop(target_width: int, target_height: int):
     def _f(img):
-        H, W = img.height, img.width
-        scalefactor = h / H
-        newH, newW = round(H*scalefactor), round(W*scalefactor)
-        img = F.resize(img, (newH, newW), interpolation=IM.BICUBIC, antialias=True)
-        return F.center_crop(img, (h, w))
+        src_height, src_width = img.height, img.width
+        scale = max(target_width / src_width, target_height / src_height)
+        resized_width, resized_height = round(src_width * scale), round(src_height * scale)
+        img = F.resize(img, (resized_height, resized_width), interpolation=IM.BICUBIC, antialias=True)
+        return F.center_crop(img, (target_height, target_width))
     return _f
 
 def get_transform(width, height):
@@ -85,6 +85,22 @@ def get_transform(width, height):
         TVT.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
+
+def _load_vae_fp32(model_id: str):
+    global device
+
+    from diffusers import AutoencoderKL
+
+    vae = AutoencoderKL.from_pretrained(
+        model_id,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+    )
+
+    vae.to(device)
+    vae.eval()
+    return vae
+
 @torch.no_grad()
 def main():
     args = parse_args()
@@ -92,15 +108,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load pipeline (for VAE)
-    pipe = DiffusionPipeline.from_pretrained(
-        args.model,
-        torch_dtype=torch.float32,
-        safety_checker=None,
-        requires_safety_checker=False,
-        custom_pipeline=args.model if args.custom else None,
-    )
-    vae = pipe.vae.to(device)
-    vae.eval()
+    vae = _load_vae_fp32(args.model)
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
