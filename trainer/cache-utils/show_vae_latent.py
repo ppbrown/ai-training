@@ -42,7 +42,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         help="Diffusers model directory or repo (must have VAE)",
-        default="/BLUE/t5-train/models/sdxl-orig",
+        default="stabilityai/stable-diffusion-xl-base-1.0",
     )
     p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
     p.add_argument(
