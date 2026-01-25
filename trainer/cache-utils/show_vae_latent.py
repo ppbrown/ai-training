@@ -121,20 +121,26 @@ class Viewer:
     def quit(self, _event=None):
         self.root.destroy()
 
+def _load_vae_fp32(model_id: str):
+    from diffusers import AutoencoderKL
+
+    vae = AutoencoderKL.from_pretrained(
+        model_id,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+    )
+
+    vae.to("cpu")
+    vae.eval()
+    return vae
+
 
 def main():
     args = build_argparser().parse_args()
 
     print(f"Using model {args.model} on {len(args.files)} file(s)")
 
-    pipe = DiffusionPipeline.from_pretrained(
-        args.model,
-        torch_dtype=torch.float32,
-        safety_checker=None,
-        requires_safety_checker=False,
-        custom_pipeline=args.model if args.custom else None,
-    )
-    vae_model = pipe.vae.to(device).eval()
+    vae_model = _load_vae_fp32(args.model)
 
     root = tk.Tk()
     Viewer(root, vae_model, args.files)
