@@ -1,10 +1,23 @@
 #!/bin/env python
+"""Utility to decode a VAE cache file
 
-# Pass in one or more latent image cachefiles (.safetensors with key "latent")
-# Decode via the model VAE and view interactively:
-#   - Next: Right / Space / n
-#   - Prev: Left / p
-#   - Quit: q / Esc
+Default is to show the given filenames on display. However,
+with --writepreview, it will write a companion file,
+   "{file}.imgpreview"
+The cache generator does not write these files by default, because
+out of 1000s of files, you probably only need to check certain
+small categories (eg: humans)
+
+Usage:
+
+ Pass in one or more latent image cachefile names
+    (safetensors with key "latent")
+  --model MODEL   Diffusers model directory or repo (must have VAE)
+  --custom        Look for custom pipeline in the model
+  --writepreview  Write out a .imgpreview file instead of display
+
+"""
+
 
 import sys
 device = "cpu"  # or: torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,6 +50,11 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Look for custom pipeline in the model",
     )
     p.add_argument(
+        "--writepreview",
+        action="store_true",
+        help="Write out a .imgpreview file instead of display",
+    )
+    p.add_argument(
         "files",
         nargs="+",
         help="Path(s) to VAE cache file(s) (.safetensors) containing key 'latent'",
@@ -45,7 +63,11 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def decode_latent_to_pil(vae_model, file_path: str):
-    cached = st.load_file(file_path)["latent"].to(device)
+    try:
+        cached = st.load_file(file_path)["latent"].to(device)
+    except Exception:
+        print("ERROR: could not load file", file_path)
+        exit(1)
 
     # Expect latent shape like (C, H, W); add batch dim for decode()
     decoded = vae_model.decode(cached.unsqueeze(0)).sample
@@ -135,16 +157,42 @@ def _load_vae_fp32(model_id: str):
     return vae
 
 
+def WritePreviews(vae_model, files: list[str]) -> list[Path]:
+    """
+    Write lossless preview images next to each input cache file.
+
+    Output filename: <input_stem>.imgpreview
+    Encoding: lossless WebP (space-efficient, lossless).
+    """
+    written: list[Path] = []
+
+    for file_path in files:
+        in_path = Path(file_path)
+        out_path = in_path.with_suffix(".imgpreview")
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+
+        pil_img, _latent_shape = decode_latent_to_pil(vae_model, str(in_path))
+
+        pil_img.save(tmp_path, format="WEBP", lossless=True, method=6)
+        tmp_path.replace(out_path)
+        written.append(out_path)
+
+    return written
+
+
 def main():
     args = build_argparser().parse_args()
 
     print(f"Using model {args.model} on {len(args.files)} file(s)")
 
     vae_model = _load_vae_fp32(args.model)
+    if args.writepreview:
+        WritePreviews(vae_model, args.files)
+        exit(0)
 
-    root = tk.Tk()
-    Viewer(root, vae_model, args.files)
-    root.mainloop()
+    rootwin = tk.Tk()
+    Viewer(rootwin, vae_model, args.files)
+    rootwin.mainloop()
 
 
 if __name__ == "__main__":
