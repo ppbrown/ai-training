@@ -34,7 +34,7 @@ from torchvision.transforms import InterpolationMode as IM
 import torchvision.transforms.functional as F
 
 import safetensors.torch as st
-from diffusers import DiffusionPipeline
+from diffusers import DiffusionPipeline, AutoencoderKL
 from PIL import Image
 
 
@@ -50,8 +50,12 @@ torch.backends.cudnn.allow_tf32 = False
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="stabilityai/stable-diffusion-xl-base-1.0",
-                   help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)")
+    p.add_argument(
+        "--model", 
+        default="stabilityai/stable-diffusion-xl-base-1.0",
+        help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)",
+    )
+    p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
     p.add_argument("--data_root", required=True,
                    help="Directory containing images (recursively searched)")
     p.add_argument("--out_suffix", default=".img_sdxl", 
@@ -91,16 +95,20 @@ def get_transform(width, height):
     ])
 
 
-def _load_vae_fp32(model_id: str):
+def _load_vae_fp32(model_id: str, vae: bool):
     global device
 
-    from diffusers import AutoencoderKL
-
-    vae = AutoencoderKL.from_pretrained(
-        model_id,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-    )
+    if vae:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            torch_dtype=torch.float32,
+        )
+    else:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            subfolder="vae",
+            torch_dtype=torch.float32,
+        )
 
     vae.to(device)
     vae.eval()
@@ -112,7 +120,7 @@ def main():
 
 
     # Load pipeline (for VAE)
-    vae = _load_vae_fp32(args.model)
+    vae = _load_vae_fp32(args.model, args.vae)
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
