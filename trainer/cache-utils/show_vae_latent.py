@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 import safetensors.torch as st
-from diffusers import DiffusionPipeline
+from diffusers import DiffusionPipeline, AutoencoderKL
 from torchvision.transforms.functional import to_pil_image
 
 import tkinter as tk
@@ -44,6 +44,7 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Diffusers model directory or repo (must have VAE)",
         default="/BLUE/t5-train/models/sdxl-orig",
     )
+    p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
     p.add_argument(
         "--custom",
         action="store_true",
@@ -143,14 +144,19 @@ class Viewer:
     def quit(self, _event=None):
         self.root.destroy()
 
-def _load_vae_fp32(model_id: str):
-    from diffusers import AutoencoderKL
+def _load_vae_fp32(model_id: str, vae: bool):
 
-    vae = AutoencoderKL.from_pretrained(
-        model_id,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-    )
+    if vae:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            torch_dtype=torch.float32,
+        )
+    else:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            subfolder="vae",
+            torch_dtype=torch.float32,
+        )
 
     vae.to("cpu")
     vae.eval()
@@ -185,7 +191,7 @@ def main():
 
     print(f"Using model {args.model} on {len(args.files)} file(s)")
 
-    vae_model = _load_vae_fp32(args.model)
+    vae_model = _load_vae_fp32(args.model, args.vae)
     if args.writepreview:
         WritePreviews(vae_model, args.files)
         exit(0)
