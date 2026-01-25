@@ -8,20 +8,6 @@
     seperate processes of this, after splitting up dataset accordingly
 """
 
-import argparse
-from pathlib import Path
-from tqdm.auto import tqdm
-
-import torch
-import torchvision.transforms as TVT
-from torchvision.transforms import InterpolationMode as IM
-import torchvision.transforms.functional as F
-
-import safetensors.torch as st
-from diffusers import DiffusionPipeline
-from PIL import Image
-
-
 import os
 import sys
 import subprocess
@@ -37,6 +23,23 @@ if os.environ.get(ENV_VAR) != DESIRED:
     # Use os.execvpe to replace the current process (no zombie parent)
     os.execvpe(args[0], args, os.environ)
     sys.exit(1) # If exec fails, exit explicitly
+
+import argparse
+from pathlib import Path
+from tqdm.auto import tqdm
+
+import torch
+import torchvision.transforms as TVT
+from torchvision.transforms import InterpolationMode as IM
+import torchvision.transforms.functional as F
+
+import safetensors.torch as st
+from diffusers import DiffusionPipeline
+from PIL import Image
+
+
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
@@ -87,22 +90,29 @@ def get_transform(width, height):
         TVT.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
+
+def _load_vae_fp32(model_id: str):
+    global device
+
+    from diffusers import AutoencoderKL
+
+    vae = AutoencoderKL.from_pretrained(
+        model_id,
+        subfolder="vae",
+        torch_dtype=torch.float32,
+    )
+
+    vae.to(device)
+    vae.eval()
+    return vae
+
 @torch.no_grad()
 def main():
     args = parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load pipeline (for VAE)
-    pipe = DiffusionPipeline.from_pretrained(
-        args.model,
-        torch_dtype=torch.float32,
-#        safety_checker=None,
-#        requires_safety_checker=False,
-        custom_pipeline=args.model if args.custom else None,
-    )
-    vae = pipe.vae.to(device)
-    vae.eval()
+    vae = _load_vae_fp32(args.model)
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
