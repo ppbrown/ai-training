@@ -122,6 +122,9 @@ def main() -> None:
     )
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
+    # Unless you are fine with really small batch size, you will need this
+    p.add_argument('--gradient_checkpointing', action='store_true')
+
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset).")
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
@@ -139,6 +142,10 @@ def main() -> None:
         subfolder="vae",
         torch_dtype=torch.float32,
     ).to(device)
+
+    if args.gradient_checkpointing:
+        print("Enabling Gradient Checkpointing. Mo' mem, less speed")
+        vae.enable_gradient_checkpointing()
 
     vae.train()
 
