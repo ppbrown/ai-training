@@ -3,7 +3,7 @@
 
 Default is to show the given filenames on display. However,
 with --writepreview, it will write a companion file,
-   "{file}.imgpreview"
+   "{file}.webp"
 The cache generator does not write these files by default, because
 out of 1000s of files, you probably only need to check certain
 small categories (eg: humans)
@@ -14,7 +14,7 @@ Usage:
     (safetensors with key "latent")
   --model MODEL   Diffusers model directory or repo (must have VAE)
   --custom        Look for custom pipeline in the model
-  --writepreview  Write out a .imgpreview file instead of display
+  --writepreview  Write out a .webp file instead of displaying
 
 """
 
@@ -53,7 +53,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--writepreview",
         action="store_true",
-        help="Write out a .imgpreview file instead of display",
+        help="Write out a .webp file instead of display",
     )
     p.add_argument(
         "files",
@@ -167,21 +167,20 @@ def WritePreviews(vae_model, files: list[str]) -> list[Path]:
     """
     Write lossless preview images next to each input cache file.
 
-    Output filename: <input_stem>.imgpreview
+    Output filename: <input_file>.webp
     Encoding: lossless WebP (space-efficient, lossless).
     """
     written: list[Path] = []
 
     for file_path in files:
         in_path = Path(file_path)
-        out_path = in_path.with_suffix(".imgpreview")
-        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        out_path = Path(file_path + ".webp")
 
         pil_img, _latent_shape = decode_latent_to_pil(vae_model, str(in_path))
 
-        pil_img.save(tmp_path, format="WEBP", lossless=True, method=6)
-        tmp_path.replace(out_path)
+        pil_img.save(out_path, format="WEBP", lossless=True, method=6)
         written.append(out_path)
+        print("Saved preview to", out_path)
 
     return written
 
