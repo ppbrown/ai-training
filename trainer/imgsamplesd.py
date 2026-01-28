@@ -43,7 +43,11 @@ if args.output_directory:
 else:
     OUTDIR=MODEL if os.path.isdir(MODEL) else "./"
 print("Will output results to directory", OUTDIR)
-
+try:
+    os.mkdir(OUTDIR):
+    print(OUTDIR, "created.")
+except FileExistsError:
+    pass
 
 pipe = DiffusionPipeline.from_pretrained(
     MODEL, use_safetensors=True,
