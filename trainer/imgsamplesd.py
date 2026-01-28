@@ -44,7 +44,7 @@ else:
     OUTDIR=MODEL if os.path.isdir(MODEL) else "./"
 print("Will output results to directory", OUTDIR)
 try:
-    os.mkdir(OUTDIR):
+    os.mkdir(OUTDIR)
     print(OUTDIR, "created.")
 except FileExistsError:
     pass
