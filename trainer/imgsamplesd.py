@@ -3,6 +3,19 @@
 # Util to create image samples from a model.
 # I use this one primarily on "normal", non-T5 SD
 
+
+import os, sys
+
+# Could avoid the restart by just setting this env var yourself
+force_cpu():
+    if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("", "-1"):
+        print("Restarting to force CPU...")
+        os.execvpe(sys.executable, 
+                   [sys.executable, *sys.argv],
+                   {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+                   )
+
+
 def argproc():
     import argparse
     p = argparse.ArgumentParser()
@@ -10,6 +23,8 @@ def argproc():
     p.add_argument("--seed",  type=int, default=90)
     p.add_argument("--inc_seed",  action="store_true", 
                    help="auto-increment the sample seed for multi-prompt")
+    p.add_argument("--force_cpu",  action="store_true", 
+                   help="Avoid using CUDA (Because youre busy training stuff!)")
     p.add_argument("--steps",  type=int, default=30)
     p.add_argument("--vae_scaling",  type=float)
     p.add_argument("--prompt", nargs="+", 
@@ -18,6 +33,12 @@ def argproc():
     return p.parse_args()
 
 args=argproc()
+
+if args.force_cpu:
+    force_cpu()
+    device="cpu"
+else:
+    device="cuda"
 
 from diffusers import DiffusionPipeline
 import torch.nn as nn, torch, types
@@ -64,7 +85,8 @@ if args.vae_scaling:
 pipe.safety_checker=None
 
 print("model initialized. ")
-pipe.enable_sequential_cpu_offload()
+if not args.force_cpu:
+    pipe.enable_sequential_cpu_offload()
 # The above obviates the need for to("cuda") I guess..
 #pipe.to("cuda")
 
@@ -73,9 +95,9 @@ seed=args.seed
 
 if args.inc_seed:
     # Allow batch jobs to auto-increment the random seed
-    generator = torch.Generator(device="cuda").manual_seed(seed)
+    generator = torch.Generator(device=device).manual_seed(seed)
 else:
-    generator = [torch.Generator(device="cuda").manual_seed(seed) for _ in range(len(prompt))]
+    generator = [torch.Generator(device=device).manual_seed(seed) for _ in range(len(prompt))]
 
 print(f"Trying render of '{prompt}' using seed {seed}")
 
