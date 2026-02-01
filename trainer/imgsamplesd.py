@@ -7,7 +7,7 @@
 import os, sys
 
 # Could avoid the restart by just setting this env var yourself
-force_cpu():
+def force_cpu():
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in ("", "-1"):
         print("Restarting to force CPU...")
         os.execvpe(sys.executable, 
@@ -26,9 +26,11 @@ def argproc():
     p.add_argument("--force_cpu",  action="store_true", 
                    help="Avoid using CUDA (Because youre busy training stuff!)")
     p.add_argument("--steps",  type=int, default=30)
-    p.add_argument("--vae_scaling",  type=float)
+    p.add_argument("--offload",  action="store_true", 
+                   help="use enable_sequential_cpu_offload()")
     p.add_argument("--prompt", nargs="+", 
                    default=["woman"], help="one or more prompt strings")
+    p.add_argument("--vae_scaling",  type=float)
     p.add_argument("--output_directory", type=str)
     return p.parse_args()
 
@@ -45,6 +47,11 @@ import torch.nn as nn, torch, types
 import os,sys
 
 from PIL import Image, PngImagePlugin
+
+# Quality tweak
+import torch
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 
 MODEL = args.model
@@ -85,10 +92,15 @@ if args.vae_scaling:
 pipe.safety_checker=None
 
 print("model initialized. ")
-if not args.force_cpu:
+if args.offload:
     pipe.enable_sequential_cpu_offload()
-# The above obviates the need for to("cuda") I guess..
-#pipe.to("cuda")
+    print("Using cpu offloading to save VRAM")
+    # Note that if you use offload(), there is an implied
+    #   pipe.to("cuda")
+    # Note also that somehow, using this increases pure-cpu speed?
+
+elif not args.force_cpu:
+    pipe.to("cuda")
 
 prompt=args.prompt
 seed=args.seed
