@@ -30,7 +30,7 @@ def sample_img(args, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
     generator = [torch.Generator(device="cuda").manual_seed(seed)
                  for _ in range(len(prompt))]
 
-    images = pipe(prompt, num_inference_steps=args.sample_steps, generator=generator).images
+    images = pipe(prompt, num_inference_steps=args.sampler_steps, generator=generator).images
     for ndx, image in enumerate(images):
         fname = f"sample-{seed}-{ndx}.png"
         outname = f"{CHECKPOINT_DIR}/{fname}"
