@@ -22,14 +22,16 @@ def argproc():
     p.add_argument("--model", type=str, required=True)
     p.add_argument("--seed",  type=int, default=90)
     p.add_argument("--inc_seed",  action="store_true", 
-                   help="auto-increment the sample seed for multi-prompt")
+                   help="Auto-increment the sample seed for multi-prompt")
     p.add_argument("--force_cpu",  action="store_true", 
                    help="Avoid using CUDA (Because youre busy training stuff!)")
+    p.add_argument("--seed_device", type=str, choices=["cuda","cpu"],
+                   help="Set to cpu if you are trying to do comparisons between cuda and cpu image")
     p.add_argument("--steps",  type=int, default=30)
     p.add_argument("--offload",  action="store_true", 
-                   help="use enable_sequential_cpu_offload()")
+                   help="Use enable_sequential_cpu_offload()")
     p.add_argument("--prompt", nargs="+", 
-                   default=["woman"], help="one or more prompt strings")
+                   default=["woman"], help="One or more prompt strings")
     p.add_argument("--vae_scaling",  type=float)
     p.add_argument("--output_directory", type=str)
     return p.parse_args()
@@ -41,6 +43,12 @@ if args.force_cpu:
     device="cpu"
 else:
     device="cuda"
+
+if args.seed_device:
+    seed_device = args.seed_device
+else:
+    seed_device = device
+
 
 from diffusers import DiffusionPipeline
 import torch.nn as nn, torch, types
@@ -107,9 +115,9 @@ seed=args.seed
 
 if args.inc_seed:
     # Allow batch jobs to auto-increment the random seed
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.Generator(device=seed_device).manual_seed(seed)
 else:
-    generator = [torch.Generator(device=device).manual_seed(seed) for _ in range(len(prompt))]
+    generator = [torch.Generator(device=seed_device).manual_seed(seed) for _ in range(len(prompt))]
 
 print(f"Trying render of '{prompt}' using seed {seed}")
 
