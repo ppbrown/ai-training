@@ -10,6 +10,8 @@ def parse_args():
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
+    p.add_argument("--allow_tf32",     type=bool, default=True,
+                   help="Speed optimization. Disable when using very small LR")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
     p.add_argument("--is_custom", action="store_true",
                    help="Model provides a 'custom pipeline'")
@@ -40,7 +42,9 @@ def parse_args():
                    help="Force token length to a single value, like 256. Use for T5 cache")
 
     p.add_argument("--sample_prompt", nargs="+", type=str, help="Prompt to use for a checkpoint sample image")
-    p.add_argument("--sample_steps", type=int, default=30, help="Default=30")
+    p.add_argument("--sample_steps", type=int,
+                   help="If you want to run the sampler but not save every time")
+    p.add_argument("--sampler_steps", type=int, default=30, help="Steps for the sample process. NOT THE SAME AS sample_steps!! Default=30")
     p.add_argument("--seed",        type=int, default=90)
     p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="Default=.txt_t5cache")
     p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
