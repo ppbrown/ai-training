@@ -142,6 +142,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
+    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0alpha00")
     args = ap.parse_args()
 
     if args.allow_tf32 == True:
@@ -159,10 +160,9 @@ def main() -> None:
     torch.manual_seed(seed)
 
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    model_id = "stabilityai/stable-diffusion-xl-base-1.0"
 
     vae = AutoencoderKL.from_pretrained(
-        model_id,
+        args.model,
         subfolder="vae",
         torch_dtype=torch.float32,
     ).to(device)
@@ -240,7 +240,21 @@ def main() -> None:
 
         dec = (vae.module.decode(latents / sf).sample if use_ddp else vae.decode(latents / sf).sample)
 
-        loss = F.mse_loss(dec, x)
+        posterior = enc.latent_dist
+
+        l1 = F.l1_loss(dec, x)
+        kl = posterior.kl().mean()
+        # mse = F.mse_loss(dec, x)
+
+        # loss = 0.5 * l1 + 0.5 * mse
+        # loss = l1
+ 
+        loss = l1 + (1e-6 * kl)
+        """ mse style loss averges, and targets large scale things,
+        but may cause blur.
+        L1 is nitpicky absolute calculations better for small details
+        """
+
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -253,7 +267,7 @@ def main() -> None:
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
             if is_rank0(use_ddp, rank):
-                ckpt_dir = out_dir / f"step_{step:08d}"
+                ckpt_dir = out_dir / f"step_{step:06d}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 vae_to_save = vae.module if use_ddp else vae
                 vae_to_save.save_pretrained(str(ckpt_dir))
