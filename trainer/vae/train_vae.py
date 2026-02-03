@@ -136,11 +136,20 @@ def main() -> None:
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
+    p.add_argument("--allow_tf32", action="store_true",
+                   help="Speed optimization. (Possibly bad at extremely low LR?)")
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
     args = ap.parse_args()
+
+    if args.allow_tf32 == True:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("Enabled TF32 for speed over precision")
+    else:
+        print("Disabled TF32 for maximum precision")
 
     use_ddp, rank, local_rank = ddp_init_if_needed()
 
