@@ -136,7 +136,7 @@ def main() -> None:
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
-    p.add_argument("--allow_tf32", action="store_true",
+    ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
