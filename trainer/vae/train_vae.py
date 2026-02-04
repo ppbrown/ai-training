@@ -246,10 +246,22 @@ def main() -> None:
         kl = posterior.kl().mean()
         mse = F.mse_loss(dec, x)
 
-        # loss = 0.5 * l1 + 0.5 * mse
+        # edge / gradient loss (finite differences)
+        dx_dec = dec[:, :, :, 1:] - dec[:, :, :, :-1]
+        dy_dec = dec[:, :, 1:, :] - dec[:, :, :-1, :]
+        dx_x   = x[:,   :, :, 1:] - x[:,   :, :, :-1]
+        dy_x   = x[:,   :, 1:, :] - x[:,   :, :-1, :]
+        edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
+
+        # In theory could/should do LPIPS loss calc. 
+        # But that would be large performance hit
+
         # loss = l1
- 
-        loss = l1 + (1e-6 * kl)
+        # loss = 0.5 * l1 + 0.5 * mse
+        # loss = l1 + (1e-6 * kl)
+        loss = l1 + (0.1 * edge_l1) + (1e-6 * kl)
+
+
         """ mse style loss averges, and targets large scale things,
         but may cause blur.
         L1 is nitpicky absolute calculations better for small details
