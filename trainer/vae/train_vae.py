@@ -244,7 +244,7 @@ def main() -> None:
 
         l1 = F.l1_loss(dec, x)
         kl = posterior.kl().mean()
-        # mse = F.mse_loss(dec, x)
+        mse = F.mse_loss(dec, x)
 
         # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1
@@ -263,7 +263,9 @@ def main() -> None:
         step += 1
 
         if (step % 50 == 0 or step == 1) and is_rank0(use_ddp, rank):
-            print(f"step {step}/{args.train_steps}  loss={loss.item():.6f}  dataset={pack.name}", flush=True)
+            print(f"step {step}/{args.train_steps} "
+                    f"l1/kl/mse={l1.item():.6f}/{kl.item():.6f}/{mse.item():.6f} "
+                    f"dataset={pack.name}", flush=True)
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
             if is_rank0(use_ddp, rank):
