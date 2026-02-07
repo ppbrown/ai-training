@@ -19,6 +19,8 @@ import torchvision.transforms.functional as TVF
 from torchvision.transforms import InterpolationMode as IM
 
 from diffusers import AutoencoderKL
+import lpips
+import time
 
 # DDP
 import torch.distributed as dist
@@ -142,7 +144,9 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
-    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0alpha00")
+    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+    ap.add_argument("--use_lpips", action="store_true",
+                    help="high quality but high cost")
     args = ap.parse_args()
 
     if args.allow_tf32 == True:
@@ -151,6 +155,8 @@ def main() -> None:
         print("Enabled TF32 for speed over precision")
     else:
         print("Disabled TF32 for maximum precision")
+    if args.use_lpips:
+        print("Using LPIPS")
 
     use_ddp, rank, local_rank = ddp_init_if_needed()
 
@@ -173,6 +179,13 @@ def main() -> None:
         vae.enable_gradient_checkpointing()
 
     vae.train()
+
+    # LPIPS (frozen perceptual loss). Expects inputs in [-1, 1], which matches this script.
+    if args.use_lpips:
+        lpips_fn = lpips.LPIPS(net="vgg").to(device)
+        lpips_fn.eval()
+        for p in lpips_fn.parameters():
+            p.requires_grad_(False)
 
     if use_ddp:
         vae = DDP(vae, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
@@ -220,6 +233,9 @@ def main() -> None:
     if use_ddp:
         dist.barrier()
 
+    # timing (rank0 logs only)
+    last_log_t = time.perf_counter()
+    last_log_step = 0
     step = 0
     while step < args.train_steps:
         pack = random.choice(packs)
@@ -236,14 +252,15 @@ def main() -> None:
         x = x.to(device, non_blocking=True)
 
         enc = vae.module.encode(x) if use_ddp else vae.encode(x)
-        latents = enc.latent_dist.mean * sf
+        posterior = enc.latent_dist
+        latents = posterior.mean * sf
 
         dec = (vae.module.decode(latents / sf).sample if use_ddp else vae.decode(latents / sf).sample)
 
-        posterior = enc.latent_dist
-
         l1 = F.l1_loss(dec, x)
         kl = posterior.kl().mean()
+        if args.use_lpips:
+            lp = lpips_fn(dec, x).mean()
         mse = F.mse_loss(dec, x)
 
         # edge / gradient loss (finite differences)
@@ -253,13 +270,14 @@ def main() -> None:
         dy_x   = x[:,   :, 1:, :] - x[:,   :, :-1, :]
         edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
 
-        # In theory could/should do LPIPS loss calc. 
-        # But that would be large performance hit
 
         # loss = l1
         # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1 + (1e-6 * kl)
-        loss = l1 + (0.1 * edge_l1) + (1e-6 * kl)
+        if args.use_lpips:
+            loss = l1 + (0.1 * edge_l1) + (0.05 * lp) + (1e-6 * kl)
+        else:
+            loss = l1 + (0.1 * edge_l1) + (1e-6 * kl)
 
 
         """ mse style loss averges, and targets large scale things,
@@ -275,9 +293,18 @@ def main() -> None:
         step += 1
 
         if (step % 50 == 0 or step == 1) and is_rank0(use_ddp, rank):
+            now = time.perf_counter()
+            denom = max(1, step - last_log_step)
+            sps = (now - last_log_t) / denom
+            last_log_t = now
+            last_log_step = step
+
+            lp_val = lp.item() if args.use_lpips else 0.0
+
             print(f"step {step}/{args.train_steps} "
-                    f"l1/kl/mse={l1.item():.6f}/{kl.item():.6f}/{mse.item():.6f} "
-                    f"dataset={pack.name}", flush=True)
+                  f"l1/kl/lpips={l1.item():.6f}/{kl.item():.6f}/{lp_val:.6f} "
+                  f"s/step={sps:.4f} dataset={pack.name}",
+                  flush=True)
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
             if is_rank0(use_ddp, rank):
