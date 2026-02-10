@@ -4,6 +4,50 @@ Fine-tune SDXL VAE on real-world images using reconstruction loss only.
 """
 
 import argparse
+
+def parseargs():
+    """Define this early for faster usage response """
+    ap = argparse.ArgumentParser(description="Fine-tune SDXL VAE with image reconstruction loss only.")
+    ap.add_argument(
+        "--dataset",
+        action="append",
+        required=True,
+        help="Repeatable. Format: /path/to/dataset:WIDTHxHEIGHT (e.g., /data/laion:1024x1024)",
+    )
+    ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
+    ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
+    ap.add_argument("--gradient_checkpointing", action="store_true")
+    ap.add_argument("--allow_tf32", action="store_true",
+                   help="Speed optimization. (Possibly bad at extremely low LR?)")
+    ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
+    ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
+    ap.add_argument("--seed", type=int, default=0, help="Random seed.")
+    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+    ap.add_argument("--kl_weight", type=float, default=1e-6,
+                    help="default=1e-6")
+    ap.add_argument("--lpips_weight", type=float, default=0.0,
+                    help="high quality but high cost. Range 0.2 - 0.05")
+    ap.add_argument("--lpips_shapeonly", action="store_true",
+                    help="Compute LPIPS on shape only, ignoring color matching")
+    ap.add_argument(
+        "--laplacian_weight",
+        type=float,
+        default=0.0,
+        help="Weight for Laplacian loss term."
+            " Range 0.005-0.03 (0.01 is common)",
+    )
+    ap.add_argument(
+        "--sample_img",
+        type=str,
+        default=None,
+        help="Optional. If set, encode/decode this image through the VAE"
+            " at each save and write vae_sample.webp in the save dir.",
+    )
+    return ap.parse_args()
+
+args = parseargs()
+
 import os
 import random
 from dataclasses import dataclass
@@ -28,6 +72,22 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
+# -----------------------------
+# Loss helper
+# -----------------------------
+
+def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    High-pass filter: img - blur(img), where blur is a cheap box blur (avg_pool2d).
+    img: (B,C,H,W) in [-1,1]
+    Used to help LPIPS focus on shapes instead of color
+    """
+    if k <= 1:
+        return img
+    if k % 2 == 0:
+        raise ValueError(f"highpass kernel size must be odd; got k={k}")
+    blur = F.avg_pool2d(img, kernel_size=k, stride=1, padding=k // 2)
+    return img - blur
 
 # -----------------------------
 # Data
@@ -195,38 +255,6 @@ def is_rank0(use_ddp: bool, rank: int) -> bool:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fine-tune SDXL VAE with image reconstruction loss only.")
-    ap.add_argument(
-        "--dataset",
-        action="append",
-        required=True,
-        help="Repeatable. Format: /path/to/dataset:WIDTHxHEIGHT (e.g., /data/laion:1024x1024)",
-    )
-    ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
-    ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
-    ap.add_argument("--gradient_checkpointing", action="store_true")
-    ap.add_argument("--allow_tf32", action="store_true",
-                   help="Speed optimization. (Possibly bad at extremely low LR?)")
-    ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
-    ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
-    ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
-    ap.add_argument("--seed", type=int, default=0, help="Random seed.")
-    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
-    ap.add_argument("--lpips_weight", type=float,
-                    help="high quality but high cost. Range 0.2 - 0.05")
-    ap.add_argument(
-        "--laplacian_weight",
-        type=float,
-        default=0.05,
-        help="Weight for Laplacian (2nd-derivative) loss term (default: 0.05). Set 0 to disable.",
-    )
-    ap.add_argument(
-        "--sample_img",
-        type=str,
-        default=None,
-        help="Optional. If set, encode/decode this image through the VAE at each save and write vae_sample.webp in the save dir.",
-    )
-    args = ap.parse_args()
 
     print("Using VAE", args.model)
     if args.allow_tf32 is True:
@@ -235,10 +263,16 @@ def main() -> None:
         print("Enabled TF32 for speed over precision")
     else:
         print("Disabled TF32 for maximum precision")
-    if args.lpips_weight:
+    if args.lpips_weight > 0:
         print("Using LPIPS at", args.lpips_weight)
+    if args.lpips_shapeonly:
+        if args.lpips_weight <= 0:
+            raise SystemExit("--lpips_shapeonly requires --lpips_weight > 0")
+        print("Using LPIPS Shape-Only")
     if args.laplacian_weight != 0:
         print(f"Using Laplacian loss weight={args.laplacian_weight}")
+    elif args.lpips_weight == 0:
+        print("WARNING: suggest using either lpips or laplacian values")
 
     use_ddp, rank, local_rank = ddp_init_if_needed()
 
@@ -263,7 +297,7 @@ def main() -> None:
     vae.train()
 
     # LPIPS (frozen perceptual loss). Expects inputs in [-1, 1], which matches this script.
-    if args.lpips_weight:
+    if args.lpips_weight > 0:
         lpips_fn = lpips.LPIPS(net="vgg").to(device)
         lpips_fn.eval()
         for p in lpips_fn.parameters():
@@ -359,8 +393,25 @@ def main() -> None:
 
         l1 = F.l1_loss(dec, x)
         kl = posterior.kl().mean()
-        if args.lpips_weight:
-            lp = lpips_fn(dec, x).mean()
+        if args.lpips_weight > 0:
+            if args.lpips_shapeonly:
+                # Auto blur size based on image resolution 
+                h = int(x.shape[-2])
+                w = int(x.shape[-1])
+                m = min(h, w)
+                if m <= 640:
+                    k = 9
+                elif m <= 1024:
+                    k = 11
+                else:
+                    k = 13
+                # (k is already odd, which is required)
+                hp_dec = highpass_box(dec, k)
+                hp_x   = highpass_box(x,   k)
+                lp = lpips_fn(hp_dec, hp_x).mean()
+            else:
+                lp = lpips_fn(dec, x).mean()
+
         mse = F.mse_loss(dec, x)
 
         # edge / gradient loss (finite differences)
@@ -375,10 +426,12 @@ def main() -> None:
 
         # loss = l1 # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1 + (1e-6 * kl)
-        if args.lpips_weight:
-            loss = l1 + (0.1 * edge_l1) + (args.lpips_weight * lp) + (1e-6 * kl)
+        if args.lpips_weight > 0:
+            #loss = l1 + (0.1 * edge_l1) + (args.lpips_weight * lp) + (1e-6 * kl)
+            #loss = (args.lpips_weight * lp) + (0.8 * l1) + (1e-6 * kl)
+            loss = (args.lpips_weight * lp) + (0.8 * l1) + (args.kl_weight * kl)
         else:
-            loss = l1 + (0.1 * edge_l1) + (1e-6 * kl)
+            loss = l1 + (0.1 * edge_l1) + (args.kl_weight * kl)
 
         # Laplacian (2nd-derivative) loss
         lap_loss = None
