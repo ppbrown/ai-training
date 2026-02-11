@@ -342,7 +342,12 @@ def main() -> None:
             epoch=0,
         ))
 
-    opt = torch.optim.AdamW(vae.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-2)
+    opt = torch.optim.AdamW(
+        vae.parameters(), 
+        lr=args.lr, 
+        betas=(0.9, 0.999), 
+        weight_decay=1e-4,
+    )
 
     # scaling factor
     vae_for_config = vae.module if use_ddp else vae
@@ -432,7 +437,12 @@ def main() -> None:
         if args.lpips_weight > 0:
             #loss = l1 + (0.1 * edge_l1) + (args.lpips_weight * lp) + (1e-6 * kl)
             #loss = (args.lpips_weight * lp) + (0.8 * l1) + (1e-6 * kl)
-            loss = (args.lpips_weight * lp) + (0.8 * l1) + (args.kl_weight * kl)
+            loss = (
+                (args.lpips_weight * lp)
+                + (0.8 * l1)
+                + (0.05 * edge_l1)
+                + (args.kl_weight * kl)
+            )
         else:
             loss = l1 + (0.1 * edge_l1) + (args.kl_weight * kl)
 
