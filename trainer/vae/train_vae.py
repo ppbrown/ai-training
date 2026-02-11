@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
@@ -282,12 +283,14 @@ def main() -> None:
     torch.manual_seed(seed)
 
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-
-    vae = AutoencoderKL.from_pretrained(
-        args.model,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-    ).to(device)
+    try:
+        vae = AutoencoderKL.from_pretrained(
+            args.model,
+            subfolder="vae",
+            torch_dtype=torch.float32,
+        ).to(device)
+    except EnvironmentError:
+        raise SystemExit("ERROR: Cannot load model from", args.model)
 
     if args.gradient_checkpointing:
         if is_rank0(use_ddp, rank):
