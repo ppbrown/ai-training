@@ -26,10 +26,18 @@ def parseargs():
     ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
     ap.add_argument("--kl_weight", type=float, default=1e-6,
                     help="default=1e-6")
+    ap.add_argument("--edge_l1_weight", type=float, default=0.1,
+                    help="default=0.1")
     ap.add_argument("--lpips_weight", type=float, default=0.0,
                     help="high quality but high cost. Range 0.2 - 0.05")
     ap.add_argument("--lpips_shapeonly", action="store_true",
                     help="Compute LPIPS on shape only, ignoring color matching")
+    ap.add_argument(
+        "--hf_luma_only",
+        action="store_true",
+        help="Compute edge/laplacian losses on luma (Y) only"
+            " instead of RGB to avoid chroma-driven 'sharpness' cheats.",
+    )
     ap.add_argument(
         "--laplacian_weight",
         type=float,
@@ -74,7 +82,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 # -----------------------------
-# Loss helper
+# Loss helpers
 # -----------------------------
 
 def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
@@ -89,6 +97,17 @@ def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
         raise ValueError(f"highpass kernel size must be odd; got k={k}")
     blur = F.avg_pool2d(img, kernel_size=k, stride=1, padding=k // 2)
     return img - blur
+
+def rgb_to_luma(x: torch.Tensor) -> torch.Tensor:
+    """
+    Convert (B,3,H,W) in [-1,1] to luma (B,1,H,W).
+    Uses BT.601 coefficients; good enough for our purpose.
+    """
+    r = x[:, 0:1]
+    g = x[:, 1:2]
+    b = x[:, 2:3]
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
 
 # -----------------------------
 # Data
@@ -379,6 +398,7 @@ def main() -> None:
     last_log_t = time.perf_counter()
     last_log_step = 0
     step = 0
+
     while step < args.train_steps:
         pack = random.choice(packs)
 
@@ -401,9 +421,10 @@ def main() -> None:
 
         l1 = F.l1_loss(dec, x)
         kl = posterior.kl().mean()
+
         if args.lpips_weight > 0:
             if args.lpips_shapeonly:
-                # Auto blur size based on image resolution 
+                # Auto blur size based on image resolution
                 h = int(x.shape[-2])
                 w = int(x.shape[-1])
                 m = min(h, w)
@@ -415,45 +436,67 @@ def main() -> None:
                     k = 13
                 # (k is already odd, which is required)
                 hp_dec = highpass_box(dec, k)
-                hp_x   = highpass_box(x,   k)
+                hp_x = highpass_box(x, k)
                 lp = lpips_fn(hp_dec, hp_x).mean()
             else:
                 lp = lpips_fn(dec, x).mean()
 
         mse = F.mse_loss(dec, x)
 
-        # edge / gradient loss (finite differences)
-        dx_dec = dec[:, :, :, 1:] - dec[:, :, :, :-1]
-        dy_dec = dec[:, :, 1:, :] - dec[:, :, :-1, :]
-        dx_x   = x[:,   :, :, 1:] - x[:,   :, :, :-1]
-        dy_x   = x[:,   :, 1:, :] - x[:,   :, :-1, :]
-        edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
+        # -----------------------------
+        # High-frequency loss domain selection
+        # -----------------------------
+        if args.hf_luma_only:
+            dec_hf = rgb_to_luma(dec)  # (B,1,H,W)
+            x_hf = rgb_to_luma(x)      # (B,1,H,W)
+        else:
+            dec_hf = dec              # (B,3,H,W)
+            x_hf = x                  # (B,3,H,W)
 
-        # In theory could/should do LPIPS loss calc. 
-        # But that would be large performance hit
+        # -----------------------------
+        # edge / gradient loss (finite differences)
+        # -----------------------------
+        dx_dec = dec_hf[:, :, :, 1:] - dec_hf[:, :, :, :-1]
+        dy_dec = dec_hf[:, :, 1:, :] - dec_hf[:, :, :-1, :]
+        dx_x = x_hf[:, :, :, 1:] - x_hf[:, :, :, :-1]
+        dy_x = x_hf[:, :, 1:, :] - x_hf[:, :, :-1, :]
+        edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
 
         # loss = l1 # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1 + (1e-6 * kl)
         if args.lpips_weight > 0:
-            #loss = l1 + (0.1 * edge_l1) + (args.lpips_weight * lp) + (1e-6 * kl)
-            #loss = (args.lpips_weight * lp) + (0.8 * l1) + (1e-6 * kl)
             loss = (
                 (args.lpips_weight * lp)
                 + (0.8 * l1)
-                + (0.05 * edge_l1)
+                + (args.edge_l1_weight * edge_l1)
                 + (args.kl_weight * kl)
             )
         else:
-            loss = l1 + (0.1 * edge_l1) + (args.kl_weight * kl)
+            # Yes, no scalar on l1 here
+            loss = (
+                l1
+                + (args.edge_l1_weight * edge_l1)
+                + (args.kl_weight * kl)
+            )
 
+        # -----------------------------
         # Laplacian (2nd-derivative) loss
+        # -----------------------------
         lap_loss = None
         if lap_kernel is not None:
-            lap_dec = F.conv2d(dec, lap_kernel, padding=1, groups=3)
-            lap_x   = F.conv2d(x,   lap_kernel, padding=1, groups=3)
+            if args.hf_luma_only:
+                # dec_hf/x_hf are (B,1,H,W); lap_kernel is assumed (3,1,3,3) for RGB.
+                lap_k = lap_kernel[:1, :1].contiguous()  # (1,1,3,3)
+                lap_dec = F.conv2d(dec_hf, lap_k, padding=1, groups=1)
+                lap_x = F.conv2d(x_hf, lap_k, padding=1, groups=1)
+            else:
+                lap_dec = F.conv2d(dec, lap_kernel, padding=1, groups=3)
+                lap_x = F.conv2d(x, lap_kernel, padding=1, groups=3)
+
             lap_loss = F.l1_loss(lap_dec, lap_x)
 
-        """ mse style loss averges, and targets large scale things,
+        """
+        mse style loss averages, and targets large scale things,
         but may cause blur.
         L1 is nitpicky absolute calculations better for small details
         """
@@ -475,9 +518,12 @@ def main() -> None:
             last_log_step = step
 
             lp_val = lp.item() if args.lpips_weight else 0.0
+            lap_val = lap_loss.item() if lap_loss is not None else 0.0
 
             print(f"step {step}/{args.train_steps} "
-                  f"l1/kl/lpips={l1.item():.6f}/{kl.item():.6f}/{lp_val:.6f} "
+                  f"l1/kl/lpips/edge/lap="
+                  f"{l1.item():.4f}/{kl.item():.4f}/{lp_val:.4f}/"
+                  f"{edge_l1.item():.4f}/{lap_val:.4f} "
                   f"s/step={sps:.4f} dataset={pack.name}", 
                   flush=True)
 
