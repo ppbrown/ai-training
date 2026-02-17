@@ -39,6 +39,12 @@ def parseargs():
             " instead of RGB to avoid chroma-driven 'sharpness' cheats.",
     )
     ap.add_argument(
+        "--hf_energy_weight",
+        type=float,
+        default=0.0,
+        help="Weight for matching high-frequency energy on luma (helps prevent blurred recon).",
+    )
+    ap.add_argument(
         "--laplacian_weight",
         type=float,
         default=0.0,
@@ -472,9 +478,8 @@ def main() -> None:
                 + (args.kl_weight * kl)
             )
         else:
-            # Yes, no scalar on l1 here
             loss = (
-                l1
+                (0.8 * l1)
                 + (args.edge_l1_weight * edge_l1)
                 + (args.kl_weight * kl)
             )
@@ -495,6 +500,12 @@ def main() -> None:
 
             lap_loss = F.l1_loss(lap_dec, lap_x)
 
+            # High-frequency "energy" match: compare magnitudes so blur is penalized
+            hf_energy_loss = None
+            if args.hf_energy_weight > 0:
+                #hf_energy_loss = F.l1_loss(lap_dec.abs(), lap_x.abs())
+                hf_energy_loss = F.l1_loss(lap_dec.square(), lap_x.square())
+
         """
         mse style loss averages, and targets large scale things,
         but may cause blur.
@@ -503,6 +514,9 @@ def main() -> None:
 
         if lap_loss is not None:
             loss = loss + (args.laplacian_weight * lap_loss)
+
+        if hf_energy_loss is not None:
+            loss = loss + (args.hf_energy_weight * hf_energy_loss)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -519,12 +533,15 @@ def main() -> None:
 
             lp_val = lp.item() if args.lpips_weight else 0.0
             lap_val = lap_loss.item() if lap_loss is not None else 0.0
+            hf_val = hf_energy_loss.item() if hf_energy_loss is not None else 0.0
 
             print(f"step {step}/{args.train_steps} "
                   f"l1/kl/lpips/edge/lap="
                   f"{l1.item():.4f}/{kl.item():.4f}/{lp_val:.4f}/"
-                  f"{edge_l1.item():.4f}/{lap_val:.4f} "
-                  f"s/step={sps:.4f} dataset={pack.name}", 
+                  f"{edge_l1.item():.4f}/{lap_val:.4f} ",
+                  flush=True)
+            print(
+                    f"s/step={sps:.4f} hf={hf_val:.4f} dataset={pack.name}", 
                   flush=True)
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
