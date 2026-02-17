@@ -33,23 +33,22 @@ def parseargs():
     ap.add_argument("--lpips_shapeonly", action="store_true",
                     help="Compute LPIPS on shape only, ignoring color matching")
     ap.add_argument(
-        "--hf_luma_only",
-        action="store_true",
+        "--hf_luma_only", action="store_true",
         help="Compute edge/laplacian losses on luma (Y) only"
             " instead of RGB to avoid chroma-driven 'sharpness' cheats.",
     )
     ap.add_argument(
-        "--hf_energy_weight",
-        type=float,
-        default=0.0,
+        "--hf_energy_weight", type=float, default=0.0,
         help="Weight for matching high-frequency energy on luma (helps prevent blurred recon).",
     )
     ap.add_argument(
-        "--laplacian_weight",
-        type=float,
-        default=0.0,
+        "--laplacian_weight", type=float, default=0.0,
         help="Weight for Laplacian loss term."
             " Range 0.005-0.03 (0.01 is common)",
+    )
+    ap.add_argument(
+        "--grad_energy_weight", type=float, default=0.0,
+        help="Match gradient energy (dx^2, dy^2). Helps reduce over-smoothing.",
     )
     ap.add_argument(
         "--sample_img",
@@ -468,6 +467,13 @@ def main() -> None:
         dy_x = x_hf[:, :, 1:, :] - x_hf[:, :, :-1, :]
         edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
 
+        grad_energy_loss = None
+        if args.grad_energy_weight > 0:
+            grad_energy_loss = (
+                F.l1_loss(dx_dec.square(), dx_x.square())
+                + F.l1_loss(dy_dec.square(), dy_x.square())
+            ) * 0.5
+
         # loss = l1 # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1 + (1e-6 * kl)
         if args.lpips_weight > 0:
@@ -517,6 +523,9 @@ def main() -> None:
 
         if hf_energy_loss is not None:
             loss = loss + (args.hf_energy_weight * hf_energy_loss)
+
+        if grad_energy_loss is not None:
+            loss = loss + (args.grad_energy_weight * grad_energy_loss)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
