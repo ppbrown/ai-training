@@ -113,6 +113,19 @@ def rgb_to_luma(x: torch.Tensor) -> torch.Tensor:
     b = x[:, 2:3]
     return 0.299 * r + 0.587 * g + 0.114 * b
 
+# Auto blur size based on image resolution
+def auto_scale_k(x):
+    h = int(x.shape[-2])
+    w = int(x.shape[-1])
+    m = min(h, w)
+    if m <= 640:
+        k = 5
+    elif m <= 1024:
+        k = 7
+    else:
+        k = 9
+    return k
+
 
 # -----------------------------
 # Data
@@ -420,33 +433,13 @@ def main() -> None:
 
         enc = vae.module.encode(x) if use_ddp else vae.encode(x)
         posterior = enc.latent_dist
-        latents = posterior.mean * sf
+        latents = posterior.mean
 
-        dec = (vae.module.decode(latents / sf).sample if use_ddp else vae.decode(latents / sf).sample)
+        dec = (vae.module.decode(latents).sample if use_ddp else vae.decode(latents).sample)
 
         l1 = F.l1_loss(dec, x)
         kl = posterior.kl().mean()
 
-        if args.lpips_weight > 0:
-            if args.lpips_shapeonly:
-                # Auto blur size based on image resolution
-                h = int(x.shape[-2])
-                w = int(x.shape[-1])
-                m = min(h, w)
-                if m <= 640:
-                    k = 9
-                elif m <= 1024:
-                    k = 11
-                else:
-                    k = 13
-                # (k is already odd, which is required)
-                hp_dec = highpass_box(dec, k)
-                hp_x = highpass_box(x, k)
-                lp = lpips_fn(hp_dec, hp_x).mean()
-            else:
-                lp = lpips_fn(dec, x).mean()
-
-        mse = F.mse_loss(dec, x)
 
         # -----------------------------
         # High-frequency loss domain selection
@@ -454,18 +447,37 @@ def main() -> None:
         if args.hf_luma_only:
             dec_hf = rgb_to_luma(dec)  # (B,1,H,W)
             x_hf = rgb_to_luma(x)      # (B,1,H,W)
+            # (B,1,H,W) -> (B,3,H,W) for LPIPS
+            dec_lp = dec_hf.repeat(1, 3, 1, 1)
+            x_lp   = x_hf.repeat(1, 3, 1, 1)
         else:
             dec_hf = dec              # (B,3,H,W)
             x_hf = x                  # (B,3,H,W)
+            dec_lp = dec
+            x_lp   = x
+
+        if args.lpips_weight > 0:
+            if args.lpips_shapeonly:
+                k = auto_scale_k(x_lp)
+                hp_dec = highpass_box(dec_lp, k)
+                hp_x = highpass_box(x_lp, k)
+                lp = lpips_fn(hp_dec, hp_x).mean()
+            else:
+                lp = lpips_fn(dec, x).mean()
 
         # -----------------------------
-        # edge / gradient loss (finite differences)
+        #  ...
         # -----------------------------
         dx_dec = dec_hf[:, :, :, 1:] - dec_hf[:, :, :, :-1]
         dy_dec = dec_hf[:, :, 1:, :] - dec_hf[:, :, :-1, :]
         dx_x = x_hf[:, :, :, 1:] - x_hf[:, :, :, :-1]
         dy_x = x_hf[:, :, 1:, :] - x_hf[:, :, :-1, :]
-        edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
+
+        if args.edge_l1_weight == 0:
+            edge_l1 = 0.0
+        else:
+            edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
+
 
         grad_energy_loss = None
         if args.grad_energy_weight > 0:
@@ -506,11 +518,18 @@ def main() -> None:
 
             lap_loss = F.l1_loss(lap_dec, lap_x)
 
-            # High-frequency "energy" match: compare magnitudes so blur is penalized
-            hf_energy_loss = None
-            if args.hf_energy_weight > 0:
-                #hf_energy_loss = F.l1_loss(lap_dec.abs(), lap_x.abs())
-                hf_energy_loss = F.l1_loss(lap_dec.square(), lap_x.square())
+        # High-frequency "energy" match: compare magnitudes so blur is penalized
+        hf_energy_loss = None
+        if args.hf_energy_weight > 0:
+            k = auto_scale_k(x_hf)
+            hp_dec = highpass_box(dec_hf, k)
+            hp_x = highpass_box(x_hf, k)
+
+            # Match high-frequency energy (microcontrast) rather than raw highpass
+            hf_energy_loss = F.l1_loss(hp_dec.square(), hp_x.square())
+
+
+        ## mse = F.mse_loss(dec, x)
 
         """
         mse style loss averages, and targets large scale things,
@@ -543,6 +562,8 @@ def main() -> None:
             lp_val = lp.item() if args.lpips_weight else 0.0
             lap_val = lap_loss.item() if lap_loss is not None else 0.0
             hf_val = hf_energy_loss.item() if hf_energy_loss is not None else 0.0
+            ge_val = grad_energy_loss.item() if grad_energy_loss is not None else 0.0
+
 
             print(f"step {step}/{args.train_steps} "
                   f"l1/kl/lpips/edge/lap="
@@ -550,7 +571,8 @@ def main() -> None:
                   f"{edge_l1.item():.4f}/{lap_val:.4f} ",
                   flush=True)
             print(
-                    f"s/step={sps:.4f} hf={hf_val:.4f} dataset={pack.name}", 
+                    f"s/step={sps:.4f} hf={hf_val:.4f}"
+                    f" ge={ge_val:.4f} dataset={pack.name}", 
                   flush=True)
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
