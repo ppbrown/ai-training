@@ -62,22 +62,26 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     return p
 
-
-def decode_latent_to_pil(vae_model, file_path: str):
+def load_latent(file_path: str):
     try:
-        cached = st.load_file(file_path)["latent"].to(device)
+        latent = st.load_file(file_path)["latent"].to(device)
     except Exception:
         print("ERROR: could not load file", file_path)
         exit(1)
+    return latent
+
+def decode_latent_to_pil(vae_model, latent):
+    p = next(vae_model.parameters())
+    latent = latent.to(device=p.device, dtype=p.dtype)
 
     # Expect latent shape like (C, H, W); add batch dim for decode()
-    decoded = vae_model.decode(cached.unsqueeze(0)).sample
+    decoded = vae_model.decode(latent.unsqueeze(0)).sample
 
     decoded = (decoded / 2 + 0.5).clamp(0, 1)  # Undo normalization
     decoded = decoded.squeeze(0).cpu()         # Remove batch dimension
 
     pil_img = to_pil_image(decoded)
-    return pil_img, tuple(cached.shape)
+    return pil_img
 
 
 class Viewer:
@@ -117,7 +121,9 @@ class Viewer:
         self._set_busy_cursor(True)
         try:
             file_path = self.files[self.idx]
-            pil_img, latent_shape = decode_latent_to_pil(self.vae_model, file_path)
+            latent = load_latent(file_path)
+            latent_shape = latent.shape
+            pil_img = decode_latent_to_pil(self.vae_model, latent)
 
             # Convert to Tk image
             self._photo = ImageTk.PhotoImage(pil_img)
@@ -175,8 +181,8 @@ def WritePreviews(vae_model, files: list[str]) -> list[Path]:
     for file_path in files:
         in_path = Path(file_path)
         out_path = Path(file_path + ".webp")
-
-        pil_img, _latent_shape = decode_latent_to_pil(vae_model, str(in_path))
+        latent = load_latent(file_path)
+        pil_img = decode_latent_to_pil(vae_model, latent)
 
         pil_img.save(out_path, format="WEBP", lossless=True, method=6)
         written.append(out_path)
