@@ -57,6 +57,7 @@ def parse_args():
         help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)",
     )
     p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
+    p.add_argument("--cpu", action="store_true")
     p.add_argument("--data_root", required=True,
                    help="Directory containing images (recursively searched)")
     p.add_argument("--out_suffix", default=".img_sdxl", 
@@ -77,8 +78,12 @@ def parse_args():
 
 def find_images(input_dir, exts):
     images = []
+    dir = Path(input_dir)
+    if not dir.exists():
+        raise SystemExit("ERROR: directory", input_dir, "does not exist")
+
     for ext in exts:
-        images += list(Path(input_dir).rglob(f"*.{ext}"))
+        images += list(dir.rglob(f"*.{ext}"))
     return sorted(images)
 
 
@@ -125,8 +130,12 @@ def _load_vae_fp32(model_id: str, vae: bool):
 
 @torch.no_grad()
 def main():
+    global device
     args = parse_args()
 
+    if args.cpu:
+        print("Forcing CPU")
+        device = "cpu"
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
