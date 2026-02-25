@@ -36,6 +36,7 @@ import torchvision.transforms.functional as F
 import safetensors.torch as st
 from diffusers import DiffusionPipeline, AutoencoderKL
 from PIL import Image
+from show_vae_latent import decode_latent_to_pil
 
 
 
@@ -51,7 +52,7 @@ torch.backends.cudnn.allow_tf32 = False
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--model", 
+        "--model",
         default="stabilityai/stable-diffusion-xl-base-1.0",
         help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)",
     )
@@ -60,12 +61,19 @@ def parse_args():
                    help="Directory containing images (recursively searched)")
     p.add_argument("--out_suffix", default=".img_sdxl", 
                    help="File suffix for saved latents(default: .img_sdxl)")
+    p.add_argument(
+        "--writepreview",
+        action="store_true",
+        default=False,
+        help="Add a webp view of the cache data. Useful for quality checking.",
+    )
     p.add_argument("--target_width", type=int, default=512, help="Width Resolution for images (default: 512)")
     p.add_argument("--target_height", type=int, default=512, help="Height Resolution for images (default: 512)")
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png", "webp"])
-    p.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
+    p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png"])
+    p.add_argument("--custom", action="store_true", help="Treat model as custom pipeline")
     return p.parse_args()
+
 
 def find_images(input_dir, exts):
     images = []
@@ -84,6 +92,7 @@ def make_cover_resize_center_crop(target_width: int, target_height: int):
         img = F.resize(img, (resized_height, resized_width), interpolation=IM.BICUBIC, antialias=True)
         return F.center_crop(img, (target_height, target_width))
     return _f
+
 
 def get_transform(width, height):
     return TVT.Compose([
@@ -119,9 +128,6 @@ def main():
     args = parse_args()
 
 
-    # Load pipeline (for VAE)
-    vae = _load_vae_fp32(args.model, args.vae)
-
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
     image_paths = []
@@ -132,6 +138,7 @@ def main():
             skipped += 1
             continue
         image_paths.append(path)
+
     if not image_paths:
         print("No new images to process (all cache files exist).")
         return
@@ -143,9 +150,12 @@ def main():
 
 
     print(f"Processing {len(image_paths)} images from {args.data_root}")
-    print("Batch size is",args.batch_size)
+    print("Batch size is", args.batch_size)
     print(f"Using {args.model} to {args.out_suffix}...")
     print("")
+
+    # Load pipeline (for VAE)
+    vae = _load_vae_fp32(args.model, args.vae)
 
     for i in tqdm(range(0, len(image_paths), args.batch_size)):
         batch_paths = image_paths[i:i+args.batch_size]
@@ -170,6 +180,9 @@ def main():
         for j, path in enumerate(valid_paths):
             out_path = path.with_name(path.stem + args.out_suffix)
             st.save_file({"latent": latents[j]}, str(out_path))
+            if args.writepreview:
+                pil_img = decode_latent_to_pil(vae, latents[j])
+                pil_img.save(str(out_path) + ".webp", format="WEBP", lossless=True, method=6)
 
 if __name__ == "__main__":
     main()
