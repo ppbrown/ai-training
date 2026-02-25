@@ -28,15 +28,23 @@ import safetensors.torch as st
 import torchvision.transforms as transforms
 from diffusers import DiffusionPipeline
 from diffusers import AutoencoderKL
+
+from vae_auto_loader import load_vae_auto
+
 from PIL import Image
 
 # Check if CUDA is available and set the device accordingly
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = "cpu"
 
+from typing import Any, Tuple
+
+
+
+
 if args.vae:
     print("Using VAE", args.vae)
-    vae_model = AutoencoderKL.from_pretrained(args.vae)
+    vae_model = load_vae_auto(args.vae)
 else:
     print("Using model", args.model)
     pipe = DiffusionPipeline.from_pretrained(
