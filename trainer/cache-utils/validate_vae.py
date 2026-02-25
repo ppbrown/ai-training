@@ -9,7 +9,6 @@
 import argparse
 
 parser = argparse.ArgumentParser()
-
 parser.add_argument("--model", 
                       help="Diffusers model directory or repo (must have VAE). Default is sd-base",
                       default="/BLUE/t5-train/models/sd-base")
@@ -55,10 +54,10 @@ input_image = Image.open(args.imgfile).convert("RGB")
 transform = transforms.Compose([
     transforms.Resize((args.res, args.res)),  # Resize to 512x512 for consistency
     transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5])  # Coordinate transformation for VAE input. Mandatory!
+    transforms.Normalize([0.5], [0.5])  # Mandatory Coordinate transformation for VAE input
 ])
 
-input_tensor = transform(input_image).unsqueeze(0).to(device)  # Add batch dimension and move to device
+input_tensor = transform(input_image).unsqueeze(0).to(device) 
 
 # Encode the image
 with torch.no_grad():
@@ -70,14 +69,10 @@ with torch.no_grad():
     cached = st.load_file("tempfile")["latent"].to(device)
     decoded_image = vae_model.decode(cached).sample
 
-decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)  # Undo normalization
-decoded_image = decoded_image.squeeze(0).cpu()          # Remove batch dimension
+decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)  # Undo transformation
+decoded_image = decoded_image.squeeze(0).cpu()
 
-#to_pil = transforms.ToPILImage()
-#pil_image = to_pil(decoded_image)
 from torchvision.transforms.functional import to_pil_image
 
 pil_image = to_pil_image(decoded_image)
-
-
 pil_image.show()
