@@ -10,19 +10,6 @@ Primary differences are:
     3. It defines blank "Safety" checks
 """
 
-import argparse
-from pathlib import Path
-from tqdm.auto import tqdm
-
-import torch
-import torchvision.transforms as TVT
-from torchvision.transforms import InterpolationMode as IM
-import torchvision.transforms.functional as F
-
-import safetensors.torch as st
-from diffusers import DiffusionPipeline
-from PIL import Image
-
 
 import os
 import sys
@@ -40,13 +27,36 @@ if os.environ.get(ENV_VAR) != DESIRED:
     os.execvpe(args[0], args, os.environ)
     sys.exit(1) # If exec fails, exit explicitly
 
+import argparse
+from pathlib import Path
+from tqdm.auto import tqdm
+
+import torch
+import torchvision.transforms as TVT
+from torchvision.transforms import InterpolationMode as IM
+import torchvision.transforms.functional as F
+
+import safetensors.torch as st
+from diffusers import DiffusionPipeline, AutoencoderKL
+from PIL import Image
+from show_vae_latent import decode_latent_to_pil
+
+
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 torch.use_deterministic_algorithms(True)
 torch.backends.cudnn.deterministic = True
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="stable-diffusion-v1-5/stable-diffusion-v1-5",
-                   help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)")
+    p.add_argument(
+        "--model",
+        default="stable-diffusion-v1-5/stable-diffusion-v1-5",
+                   help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)"
+    )
+    p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
+    p.add_argument("--cpu", action="store_true")
     p.add_argument("--data_root", required=True,
                    help="Directory containing images (recursively searched)")
     p.add_argument("--out_suffix", default=".img_sdvae", 
@@ -54,14 +64,19 @@ def parse_args():
     p.add_argument("--target_width", type=int, default=512, help="Width Resolution for images (default: 512)")
     p.add_argument("--target_height", type=int, default=512, help="Height Resolution for images (default: 512)")
     p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png", "webp"])
-    p.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
+    p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png"])
+    p.add_argument("--custom", action="store_true", help="Treat model as custom pipeline")
     return p.parse_args()
+
 
 def find_images(input_dir, exts):
     images = []
+    dir = Path(input_dir)
+    if not dir.exists():
+        raise SystemExit("ERROR: directory", input_dir, "does not exist")
+
     for ext in exts:
-        images += list(Path(input_dir).rglob(f"*.{ext}"))
+        images += list(dir.rglob(f"*.{ext}"))
     return sorted(images)
 
 
@@ -76,6 +91,7 @@ def make_cover_resize_center_crop(target_width: int, target_height: int):
         return F.center_crop(img, (target_height, target_width))
     return _f
 
+
 def get_transform(width, height):
     return TVT.Compose([
         lambda im: im.convert("RGB"),
@@ -86,16 +102,20 @@ def get_transform(width, height):
     ])
 
 
-def _load_vae_fp32(model_id: str):
+def _load_vae_fp32(model_id: str, vae: bool):
     global device
 
-    from diffusers import AutoencoderKL
-
-    vae = AutoencoderKL.from_pretrained(
-        model_id,
-        subfolder="vae",
-        torch_dtype=torch.float32,
-    )
+    if vae:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            torch_dtype=torch.float32,
+        )
+    else:
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            subfolder="vae",
+            torch_dtype=torch.float32,
+        )
 
     vae.to(device)
     vae.eval()
@@ -103,12 +123,13 @@ def _load_vae_fp32(model_id: str):
 
 @torch.no_grad()
 def main():
+    global device
     args = parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load pipeline (for VAE)
-    vae = _load_vae_fp32(args.model)
+    if args.cpu:
+        print("Forcing CPU")
+        device = "cpu"
+        args.batch_size = 1
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
@@ -120,6 +141,7 @@ def main():
             skipped += 1
             continue
         image_paths.append(path)
+
     if not image_paths:
         print("No new images to process (all cache files exist).")
         return
@@ -131,9 +153,12 @@ def main():
 
 
     print(f"Processing {len(image_paths)} images from {args.data_root}")
-    print("Batch size is",args.batch_size)
+    print("Batch size is", args.batch_size)
     print(f"Using {args.model} to {args.out_suffix}...")
     print("")
+
+    # Load pipeline (for VAE)
+    vae = _load_vae_fp32(args.model, args.vae)
 
     for i in tqdm(range(0, len(image_paths), args.batch_size)):
         batch_paths = image_paths[i:i+args.batch_size]
@@ -158,6 +183,9 @@ def main():
         for j, path in enumerate(valid_paths):
             out_path = path.with_name(path.stem + args.out_suffix)
             st.save_file({"latent": latents[j]}, str(out_path))
+            if args.writepreview:
+                pil_img = decode_latent_to_pil(vae, latents[j])
+                pil_img.save(str(out_path) + ".webp", format="WEBP", lossless=True, method=6)
 
 if __name__ == "__main__":
     main()
