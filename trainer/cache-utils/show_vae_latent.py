@@ -20,10 +20,6 @@ Usage:
 
 
 import sys
-device = "cpu"  # or: torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device, file=sys.stderr)
-# I want this to print FAST, so before other imports
-
 import argparse
 from pathlib import Path
 
@@ -64,7 +60,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def load_latent(file_path: str):
     try:
-        latent = st.load_file(file_path)["latent"].to(device)
+        latent = st.load_file(file_path)["latent"]
     except Exception:
         print("ERROR: could not load file", file_path)
         exit(1)
