@@ -136,6 +136,7 @@ def main():
     if args.cpu:
         print("Forcing CPU")
         device = "cpu"
+        args.batch_size = 1
 
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
