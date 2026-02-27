@@ -45,7 +45,7 @@ from optimi import Lion  # torch-optimi pip module
 # Speed boost for fp32 training.
 # We give up "strict fp32 math", for an alleged negligable
 # accuracy difference, and 30% speed boost.
-if args.allow_tf32:
+if args.allow_tf32 == True:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     print("Enabled TF32 for speed over precision")
