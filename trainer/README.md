@@ -82,7 +82,10 @@ But if you are doing "serious work", you need to use fp32
 
 To take sample images with the checkpoints you save, the program provides
 a convenient --sample_prompt option.
-However, when that it used, it causes a significant pause in the training.
+However, when that is used, it causes a significant pause in the training.
+(10 seconds per checkpoint save, vs 60+ seconds to load in inference mode, 
+ actually DO the inference, etc, etc)
+
 For faster training speed, use a seperate program such as [imgsamplesd.py](imgsamplesd.py)
 with --force_cpu, so you can run samples on the CPU without disturbing the training.
 
