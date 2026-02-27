@@ -59,7 +59,7 @@ You will then need to generate cache files for them. See the
 
 You can directly just call the backend "train_from_cached.py" if you like. 
 However, you will probably prefer to use the convenience front-end wrapper.
-It also effectively functions as a configuration save file.
+It also effectively functions as a configuration save file. Edit it!!
 
 Choose either [train_sd.sh](train_sd.sh) or [train_t5.sh](train_t5.sh)
 
@@ -77,6 +77,14 @@ To force full fp32, set the --fp32 flag for the backend
 
 Generally speaking, if you are doing minor additions, bf16 is fine. 
 But if you are doing "serious work", you need to use fp32
+
+### Sampling
+
+To take sample images with the checkpoints you save, the program provides
+a convenient --sample_prompt option.
+However, when that it used, it causes a significant pause in the training.
+For faster training speed, use a seperate program such as [imgsamplesd.py](imgsamplesd.py)
+with --force_cpu, so you can run samples on the CPU without disturbing the training.
 
 
 ## Benefits
