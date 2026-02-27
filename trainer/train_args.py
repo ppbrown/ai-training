@@ -127,4 +127,7 @@ def parse_args():
 
     return p.parse_args()
 
-
+# Give an easy fast short way to invoke -h
+if __name__ == "__main__":
+    parse_args()
+    print("If you got here: you were supposed to invoke this with -h ! ")
