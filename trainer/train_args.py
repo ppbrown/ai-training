@@ -12,7 +12,7 @@ def parse_args():
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
-    p.add_argument("--allow_tf32",     
+    p.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
     p.add_argument("--pretrained_model", required=True,  help="HF repo or local dir")
     p.add_argument("--is_custom", action="store_true",
