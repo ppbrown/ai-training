@@ -17,6 +17,7 @@ def parseargs():
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
+    ap.add_argument("--bf16", action="store_true",)
     ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
@@ -24,6 +25,12 @@ def parseargs():
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
     ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+    ap.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="AdamW weight decay. For late-stage VAE polish you may want 0.",
+    )
     ap.add_argument("--kl_weight", type=float, default=1e-6,
                     help="default=1e-6")
     ap.add_argument("--edge_l1_weight", type=float, default=0.1,
@@ -226,7 +233,6 @@ def tensor_to_pil_rgb(img_chw: torch.Tensor) -> Image.Image:
     """
     img_chw = img_chw.clamp(0.0, 1.0)
     img_hwc_u8 = (img_chw.permute(1, 2, 0) * 255.0).round().to(torch.uint8).cpu().numpy()
-    # Pillow 13 deprecates the explicit mode= parameter here; omit it.
     return Image.fromarray(img_hwc_u8)
 
 
@@ -293,8 +299,8 @@ def is_rank0(use_ddp: bool, rank: int) -> bool:
 
 
 def main() -> None:
+    print("Using VAE:", args.model)
 
-    print("Using VAE", args.model)
     if args.allow_tf32 is True:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -383,7 +389,7 @@ def main() -> None:
         vae.parameters(), 
         lr=args.lr, 
         betas=(0.9, 0.999), 
-        weight_decay=1e-4,
+        weight_decay=args.weight_decay,
     )
 
     # scaling factor
@@ -393,8 +399,6 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     if is_rank0(use_ddp, rank):
         out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Ensure out_dir exists before non-rank0 tries to save (it won't, but be safe)
     if use_ddp:
         dist.barrier()
 
