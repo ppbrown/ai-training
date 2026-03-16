@@ -534,7 +534,7 @@ def main() -> None:
                 hp_x = highpass_box(x_lp, k)
                 lp = lpips_fn(hp_dec, hp_x).mean()
             else:
-                lp = lpips_fn(dec, x).mean()
+                lp = lpips_fn(dec_lp, x_lp).mean()
 
         # -----------------------------
         #  ...
@@ -549,13 +549,20 @@ def main() -> None:
         else:
             edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
 
+        hf_fft_dec = None
+        hf_fft_x = None
+        if args.fft_weight > 0 or args.fft_phase_weight > 0 or args.hf_energy_weight > 0:
+            k = auto_scale_k(x_hf)
+            hf_fft_dec = highpass_box(dec_hf, k)
+            hf_fft_x = highpass_box(x_hf, k)
+
         fft_loss = None
         if args.fft_weight > 0:
-            fft_loss = fft_mag_loss(dec_hf, x_hf)
+            fft_loss = fft_mag_loss(hf_fft_dec, hf_fft_x)
 
         fft_phase = None
         if args.fft_phase_weight > 0:
-            fft_phase = fft_phase_loss(dec_hf, x_hf)
+            fft_phase = fft_phase_loss(hf_fft_dec, hf_fft_x)
 
         grad_energy_loss = None
         if args.grad_energy_weight > 0:
@@ -603,12 +610,8 @@ def main() -> None:
         # High-frequency "energy" match: compare magnitudes so blur is penalized
         hf_energy_loss = None
         if args.hf_energy_weight > 0:
-            k = auto_scale_k(x_hf)
-            hp_dec = highpass_box(dec_hf, k)
-            hp_x = highpass_box(x_hf, k)
-
             # Match high-frequency energy (microcontrast) rather than raw highpass
-            hf_energy_loss = F.l1_loss(hp_dec.square(), hp_x.square())
+            hf_energy_loss = F.l1_loss(hf_fft_dec.square(), hf_fft_x.square())
 
 
         ## mse = F.mse_loss(dec, x)
