@@ -3,11 +3,13 @@
 Fine-tune SDXL VAE on real-world images using reconstruction loss only.
 """
 
-import argparse
+import jsonargparse, json
+import os
 
 def parseargs():
     """Define this early for faster usage response """
-    ap = argparse.ArgumentParser(description="Fine-tune SDXL VAE with image reconstruction loss only.")
+    ap = jsonargparse.ArgumentParser(description="Fine-tune SDXL VAE with image reconstruction loss only.")
+    ap.add_argument("--config", action="config")
     ap.add_argument(
         "--dataset",
         action="append",
@@ -16,6 +18,8 @@ def parseargs():
     )
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
+    ap.add_argument("--skip_steps", type=int, default=0,
+                    help="For scheduler purposes, skip this many steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--bf16", action="store_true",)
     ap.add_argument("--allow_tf32", action="store_true",
@@ -35,6 +39,16 @@ def parseargs():
                     help="default=1e-6")
     ap.add_argument("--edge_l1_weight", type=float, default=0.1,
                     help="default=0.1")
+    ap.add_argument("--l1_weight", type=float, default=0.8,
+                    help="default=0.8")
+    ap.add_argument( "--fft_weight", type=float, default=0.0,
+        help="Match FFT magnitude (texture). Try 0.01-0.10 (0.02 is typical). default=0.",
+    )
+    ap.add_argument( "--fft_phase_weight", type=float, default=0.0,
+        help="FFT alignment loss: fixes tiny detail placement;"
+        " combine with --fft_weight to also match texture strength."
+        " Try 0.03-0.08. default=0.",
+    )
     ap.add_argument("--lpips_weight", type=float, default=0.0,
                     help="high quality but high cost. Range 0.2 - 0.05")
     ap.add_argument("--lpips_shapeonly", action="store_true",
@@ -64,7 +78,13 @@ def parseargs():
         help="Optional. If set, encode/decode this image through the VAE"
             " at each save and write vae_sample.webp in the save dir.",
     )
-    return ap.parse_args()
+    args = ap.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    config_path = os.path.join(args.output_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(vars(args), f, indent=4)
+    print(f"Config saved to: {config_path}")
+    return args
 
 args = parseargs()
 
@@ -133,7 +153,43 @@ def auto_scale_k(x):
         k = 9
     return k
 
+def fft_mag_log1p(x: torch.Tensor) -> torch.Tensor:
+    """
+    x: (B,C,H,W) float32
+    Returns: log1p(|rfft2(x)|) to compress dynamic range.
+    """
+    # rfft2 over H,W
+    f = torch.fft.rfft2(x, dim=(-2, -1), norm="ortho")
+    mag = torch.abs(f)  # float32
+    return torch.log1p(mag)
 
+
+def fft_mag_loss(dec_hf: torch.Tensor, x_hf: torch.Tensor) -> torch.Tensor:
+    """
+    L1 distance between log-magnitude spectra.
+    Use float32 for FFT stability (bf16 FFT support can be spotty).
+    """
+    a = fft_mag_log1p(dec_hf.float())
+    b = fft_mag_log1p(x_hf.float())
+    return F.l1_loss(a, b)
+
+def fft_phase_loss(dec_hf: torch.Tensor, x_hf: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Phase-aware FFT loss via normalized complex spectra.
+
+    - Uses float32 FFT for stability.
+    - Normalizes each FFT bin by its magnitude, so the loss emphasizes alignment/phase
+      more than raw energy.
+    - Returns L1 over (real, imag) components.
+    """
+    fd = torch.fft.rfft2(dec_hf.float(), dim=(-2, -1), norm="ortho")
+    fx = torch.fft.rfft2(x_hf.float(), dim=(-2, -1), norm="ortho")
+
+    fdn = fd / (torch.abs(fd) + eps)
+    fxn = fx / (torch.abs(fx) + eps)
+
+    # view_as_real -> (..., 2) where last dim is (real, imag)
+    return F.l1_loss(torch.view_as_real(fdn), torch.view_as_real(fxn))
 # -----------------------------
 # Data
 # -----------------------------
@@ -386,9 +442,9 @@ def main() -> None:
         ))
 
     opt = torch.optim.AdamW(
-        vae.parameters(), 
-        lr=args.lr, 
-        betas=(0.9, 0.999), 
+        vae.parameters(),
+        lr=args.lr,
+        betas=(0.9, 0.999),
         weight_decay=args.weight_decay,
     )
 
@@ -433,6 +489,14 @@ def main() -> None:
             pack.it = iter(pack.loader)
             x = next(pack.it)
 
+        # Do this here so we skip over input images in the order desired
+        if args.skip_steps >0:
+            step += 1
+            args.skip_steps -= 1
+            if args.skip_steps == 0:
+                print("Skipped to step", step)
+            continue
+
         x = x.to(device, non_blocking=True)
 
         enc = vae.module.encode(x) if use_ddp else vae.encode(x)
@@ -442,7 +506,10 @@ def main() -> None:
         dec = (vae.module.decode(latents).sample if use_ddp else vae.decode(latents).sample)
 
         l1 = F.l1_loss(dec, x)
-        kl = posterior.kl().mean()
+
+        kl = None
+        if args.kl_weight != 0:
+            kl = posterior.kl().mean()
 
 
         # -----------------------------
@@ -482,6 +549,13 @@ def main() -> None:
         else:
             edge_l1 = (F.l1_loss(dx_dec, dx_x) + F.l1_loss(dy_dec, dy_x)) * 0.5
 
+        fft_loss = None
+        if args.fft_weight > 0:
+            fft_loss = fft_mag_loss(dec_hf, x_hf)
+
+        fft_phase = None
+        if args.fft_phase_weight > 0:
+            fft_phase = fft_phase_loss(dec_hf, x_hf)
 
         grad_energy_loss = None
         if args.grad_energy_weight > 0:
@@ -492,19 +566,23 @@ def main() -> None:
 
         # loss = l1 # loss = 0.5 * l1 + 0.5 * mse
         # loss = l1 + (1e-6 * kl)
+        loss = (
+            (args.l1_weight * l1)
+            + (args.edge_l1_weight * edge_l1)
+        )
+
         if args.lpips_weight > 0:
-            loss = (
-                (args.lpips_weight * lp)
-                + (0.8 * l1)
-                + (args.edge_l1_weight * edge_l1)
-                + (args.kl_weight * kl)
-            )
-        else:
-            loss = (
-                (0.8 * l1)
-                + (args.edge_l1_weight * edge_l1)
-                + (args.kl_weight * kl)
-            )
+            loss = loss + (args.lpips_weight * lp)
+
+        if fft_loss is not None:
+            loss = loss + (args.fft_weight * fft_loss)
+
+        if fft_phase is not None:
+            loss = loss + (args.fft_phase_weight * fft_phase)
+
+
+        if kl is not None:
+            loss = loss + (args.kl_weight * kl.float())
 
         # -----------------------------
         # Laplacian (2nd-derivative) loss
@@ -567,16 +645,19 @@ def main() -> None:
             lap_val = lap_loss.item() if lap_loss is not None else 0.0
             hf_val = hf_energy_loss.item() if hf_energy_loss is not None else 0.0
             ge_val = grad_energy_loss.item() if grad_energy_loss is not None else 0.0
+            fft_val = fft_loss.item() if fft_loss is not None else 0.0
+            kl_val = kl.item() if kl is not None else 0.0
 
 
             print(f"step {step}/{args.train_steps} "
                   f"l1/kl/lpips/edge/lap="
-                  f"{l1.item():.4f}/{kl.item():.4f}/{lp_val:.4f}/"
+                  f"{l1.item():.4f}/{kl_val:.4f}/{lp_val:.4f}/"
                   f"{edge_l1.item():.4f}/{lap_val:.4f} ",
                   flush=True)
             print(
                     f"s/step={sps:.4f} hf={hf_val:.4f}"
-                    f" ge={ge_val:.4f} dataset={pack.name}", 
+                    f" fft={fft_val:.4f}",
+                    f" ge={ge_val:.4f} dataset={pack.name}",
                   flush=True)
 
         if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
