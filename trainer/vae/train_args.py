@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import jsonargparse, json
+import os
 
 def parseargs():
     """Define this early for faster usage response """
