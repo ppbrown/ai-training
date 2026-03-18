@@ -564,17 +564,28 @@ def main() -> None:
 
 
         if miner is not None:
+            # For crops, we may want shapeonly off even if global is on
+            # Pass a wrapped lpips that does/doesn't highpass based on crop_shapeonly
+            if args.lpips_weight > 0:
+                if args.crop_shapeonly:
+                    k = auto_scale_k(x)
+                    def crop_lpips(a, b):
+                        return lpips_fn(highpass_box(a, k), highpass_box(b, k))
+                else:
+                    crop_lpips = lpips_fn
+            else:
+                crop_lpips = None
+
             crop_l = miner.crop_loss(
                 vae=vae,
                 x=x,
                 dec=dec,
                 l1_weight=args.l1_weight,
-                lpips_fn=lpips_fn if args.lpips_weight > 0 else None,
+                lpips_fn=crop_lpips,
                 lpips_weight=args.lpips_weight,
                 use_ddp=use_ddp,
             )
             loss = loss + args.crop_mining_weight * crop_l
-
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
