@@ -76,6 +76,14 @@ def parseargs():
     ap.add_argument("--crop_temperature",   type=float, default=2.0)
     ap.add_argument("--crop_shapeonly",     action="store_true")
 
+    ap.add_argument("--disc_weight",  type=float, default=0.0,
+                    help="Enable 'Discriminator' (aka GAN based) loss calc")
+    ap.add_argument("--disc_start",   type=int,   default=50000,
+                    help="What step it should kick in at")
+    ap.add_argument("--disc_lr",      type=float, default=2e-4,
+                    help="Default lr for GAN is 2e-4")
+    ap.add_argument("--disc_layers",  type=int,   default=3,
+                    help="default=3")
 
 
     ap.add_argument(
@@ -85,6 +93,7 @@ def parseargs():
         help="Optional. If set, encode/decode this image through the VAE"
             " at each save and write vae_sample.webp in the save dir.",
     )
+
     args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "config.json")

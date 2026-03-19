@@ -29,8 +29,10 @@ import lpips
 import time
 
 from train_hard_region import HardRegionMiner
+from train_discriminator import NLayerDiscriminator, hinge_d_loss, generator_hinge_loss, adopt_weight, weights_init
 
-# DDP
+
+# DDP (parallel torch) (may not work)
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -403,6 +405,27 @@ def main() -> None:
             temperature=args.crop_temperature,
         )
 
+    disc = None
+    opt_d = None
+    if args.disc_weight > 0:
+        disc = NLayerDiscriminator(
+            input_nc=3,
+            ndf=64,
+            n_layers=args.disc_layers,
+        ).apply(weights_init).to(device)
+        disc.train()
+        opt_d = torch.optim.AdamW(
+            disc.parameters(),
+            lr=args.disc_lr,
+            betas=(0.5, 0.9),
+            weight_decay=0.0,
+        )
+        print(f"Discriminator enabled, starts at step {args.disc_start}")
+
+
+
+
+
     # timing (rank0 logs only)
     last_log_t = time.perf_counter()
     last_log_step = 0
@@ -587,12 +610,32 @@ def main() -> None:
             )
             loss = loss + args.crop_mining_weight * crop_l
 
+        if disc is not None:
+            d_weight = adopt_weight(args.disc_weight, step, threshold=args.disc_start)
+            if d_weight > 0:
+                logits_fake = disc(dec)
+                g_loss = generator_hinge_loss(logits_fake)
+                loss = loss + d_weight * g_loss
+
+        ############################################
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
 
-        step += 1
 
+        # Yes, discriminator code is wierd and needs to go here too...
+        if disc is not None and opt_d is not None:
+            d_weight = adopt_weight(args.disc_weight, step, threshold=args.disc_start)
+            if d_weight > 0:
+                opt_d.zero_grad(set_to_none=True)
+                logits_real = disc(x.detach())
+                logits_fake = disc(dec.detach())
+                d_loss = hinge_d_loss(logits_real, logits_fake)
+                d_loss.backward()
+                opt_d.step()
+
+        step += 1
+        ### lots of logging code now....
         if (step % 50 == 0 or step == 1) and is_rank0(use_ddp, rank):
             now = time.perf_counter()
             denom = max(1, step - last_log_step)
