@@ -344,6 +344,7 @@ def main() -> None:
 
     for spec in args.dataset:
         root, tw, th = parse_dataset_spec(spec)
+        print("Loading image paths from",root)
         ds = ImageReconDataset(root, tw, th)
 
         sampler = DistributedSampler(ds, shuffle=True) if use_ddp else None
