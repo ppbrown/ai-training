@@ -18,6 +18,8 @@ def parseargs():
     ap.add_argument("--skip_steps", type=int, default=0,
                     help="For scheduler purposes, skip this many steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
+    ap.add_argument("--tiling", action="store_true",
+                    help="Presuming high res dataset, add additional 4x highres tile processing")
     ap.add_argument("--bf16", action="store_true",)
     ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
