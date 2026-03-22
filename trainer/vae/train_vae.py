@@ -336,7 +336,7 @@ def main() -> None:
         )
         print(f"Discriminator enabled, starts at step {args.disc_start}")
 
-    if args.tiling:
+    if args.hires_tiling:
         print("Tiling enabled: each image produces 1 whole-image + 4 tile optimizer steps.")
 
     # Build data loaders
@@ -421,7 +421,7 @@ def main() -> None:
         # Each tile is a 512x512 native-resolution crop from the 1024x1024 version.
         # NW=0, NE=1, SW=2, SE=3
         # ------------------------------------------------------------------
-        if args.tiling:
+        if args.hires_tiling:
             for tile_idx in range(4):
                 x_tile = load_tile_batch(paths, tile_idx, device)
 
@@ -456,7 +456,7 @@ def main() -> None:
                 f"step {step}/{args.train_steps} "
                 f"l1={l1.item():.4f} lpips={lp_val:.4f} "
                 f"edge={edge_val:.4f} lap={lap_val:.4f} "
-                f"s/step={sps:.4f} dataset={pack.name}",
+                f"s/step={sps:.4f}",
                 flush=True,
             )
 
@@ -467,7 +467,10 @@ def main() -> None:
             ckpt_dir = out_dir / f"step_{step:06d}"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             vae.save_pretrained(str(ckpt_dir))
-            print(f"saved: {ckpt_dir}", flush=True)
+            print(f"Saved: {ckpt_dir}", flush=True)
+            print(" Datasets in use:")
+            for pack in packs:
+                print(f"   {pack.name}: {len(pack.loader.dataset)} images")
 
             if sample_img_path is not None:
                 write_vae_sample_webp(

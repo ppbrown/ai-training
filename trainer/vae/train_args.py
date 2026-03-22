@@ -22,9 +22,10 @@ def parseargs():
     ap.add_argument("--skip_steps", type=int, default=0,
                     help="For scheduler purposes, skip this many steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
-    ap.add_argument("--tiling", action="store_true",
+    ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
-                    " Note: This then counts 5 steps per image instead of 1")
+                    " Note1: This then counts 5 steps per image instead of 1."
+                    " Note2: Hardcoded to rescale to 1024x1024 fullsize, then make 512x512 tiles.")
     ap.add_argument("--bf16", action="store_true",)
     ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
