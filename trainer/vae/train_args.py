@@ -4,8 +4,12 @@ import jsonargparse, json
 import os
 
 def parseargs():
-    """Define this early for faster usage response """
-    ap = jsonargparse.ArgumentParser(description="Fine-tune SDXL VAE with image reconstruction loss only.")
+    """
+    Define this early for faster usage response 
+    Note that unlike original argparse, jsonargparse automatically 
+    shows default values
+    """
+    ap = jsonargparse.ArgumentParser(description="Fine-tune SDXL type VAE.")
     ap.add_argument("--config", action="config")
     ap.add_argument(
         "--dataset",
@@ -19,7 +23,8 @@ def parseargs():
                     help="For scheduler purposes, skip this many steps.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--tiling", action="store_true",
-                    help="Presuming high res dataset, add additional 4x highres tile processing")
+                    help="Presuming high res dataset, add additional 4x highres tile processing."
+                    " Note: This then counts 5 steps per image instead of 1")
     ap.add_argument("--bf16", action="store_true",)
     ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
@@ -34,19 +39,16 @@ def parseargs():
         default=1e-4,
         help="AdamW weight decay. For late-stage VAE polish you may want 0.",
     )
-    ap.add_argument("--kl_weight", type=float, default=1e-6,
-                    help="default=1e-6")
-    ap.add_argument("--edge_l1_weight", type=float, default=0.1,
-                    help="default=0.1")
-    ap.add_argument("--l1_weight", type=float, default=0.8,
-                    help="default=0.8")
+    ap.add_argument("--kl_weight", type=float, default=1e-6)
+    ap.add_argument("--edge_l1_weight", type=float, default=0.1)
+    ap.add_argument("--l1_weight", type=float, default=0.8)
     ap.add_argument( "--fft_weight", type=float, default=0.0,
-        help="Match FFT magnitude (texture). Try 0.01-0.10 (0.02 is typical). default=0.",
+        help="Match FFT magnitude (texture). Try 0.01-0.10 (0.02 is typical).",
     )
     ap.add_argument( "--fft_phase_weight", type=float, default=0.0,
         help="FFT alignment loss: fixes tiny detail placement;"
         " combine with --fft_weight to also match texture strength."
-        " Try 0.03-0.08. default=0.",
+        " Try 0.03-0.08.",
     )
     ap.add_argument("--lpips_weight", type=float, default=0.0,
                     help="high quality but high cost. Range 0.2 - 0.05")
@@ -84,8 +86,7 @@ def parseargs():
                     help="What step it should kick in at")
     ap.add_argument("--disc_lr",      type=float, default=2e-4,
                     help="Default lr for GAN is 2e-4")
-    ap.add_argument("--disc_layers",  type=int,   default=3,
-                    help="default=3")
+    ap.add_argument("--disc_layers",  type=int,   default=3)
 
 
     ap.add_argument(
@@ -104,3 +105,6 @@ def parseargs():
     print(f"Config saved to: {config_path}")
     return args
 
+if __name__ == "__main__":
+    # This is to test usage message
+    parseargs()
