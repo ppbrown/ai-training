@@ -20,7 +20,8 @@ def parseargs():
     ap.add_argument("--output_dir", required=True, help="Where to save the fine-tuned VAE.")
     ap.add_argument("--train_steps", type=int, required=True, help="Number of optimizer steps.")
     ap.add_argument("--skip_steps", type=int, default=0,
-                    help="For scheduler purposes, skip this many steps.")
+                    help="For scheduler purposes, skip this many steps."
+                    " Tiled steps are not counted so factor x5 if using --hires_tiling.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
