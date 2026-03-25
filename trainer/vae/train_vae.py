@@ -424,6 +424,8 @@ def main() -> None:
         if args.hires_tiling:
             for tile_idx in range(4):
                 x_tile = load_tile_batch(paths, tile_idx, device)
+                if x_tile is None:
+                    continue  # all images in batch were too small, skip this tile
 
                 tile_loss, tile_dec, _, _, _, _ = compute_loss(
                     vae, x_tile, args, device, lpips_fn, lap_kernel, miner, disc, step,

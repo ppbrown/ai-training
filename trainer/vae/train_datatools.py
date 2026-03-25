@@ -58,11 +58,31 @@ def load_image_tensor(path: Path, target_w: int, target_h: int) -> torch.Tensor:
 
 def make_tiles(path: Path) -> List[torch.Tensor]:
     """
-    Load image, resize+crop to 1024x1024, split into four 512x512 quadrants.
+    Load image and split into four 512x512 quadrants.
+
+    - If shortest edge >= 2048: resize+crop to 1024x1024, then tile.
+    - If shortest edge >= 1024: center crop to 1024x1024 directly, no upscale.
+    - If shortest edge < 1024: logs error and returns empty list (caller must handle).
+
     Returns list of 4 tensors (3, 512, 512) in [-1, 1], order: NW, NE, SW, SE.
     """
     img = Image.open(path).convert("RGB")
-    img = resize_min_and_center_crop(img, 1024, 1024)
+    w, h = img.size
+    short_edge = min(w, h)
+
+    if short_edge < 1024:
+        print(f"[WARN] Skipping tile for image too small ({w}x{h}): {path}", flush=True)
+        return []
+
+    if short_edge >= 2048:
+        # Original behavior: scale down so shorter edge = 1024, then center crop
+        img = resize_min_and_center_crop(img, 1024, 1024)
+    else:
+        # Between 1024 and 2048: just center crop at 1024x1024, no scaling
+        left = (w - 1024) // 2
+        top = (h - 1024) // 2
+        img = TVF.crop(img, top=top, left=left, height=1024, width=1024)
+
     t = pil_to_tensor(img)  # (3, 1024, 1024)
     nw = t[:, :512, :512]
     ne = t[:, :512, 512:]
@@ -84,15 +104,20 @@ def load_batch(paths: List[Path], target_w: int, target_h: int, device: torch.de
     return torch.stack(tensors).to(device, non_blocking=True)
 
 
-def load_tile_batch(paths: List[Path], tile_idx: int, device: torch.device) -> torch.Tensor:
+def load_tile_batch(paths: List[Path], tile_idx: int, device: torch.device) -> torch.Tensor | None:
     """
     Load a list of image paths as a specific 512x512 tile from their 1024x1024 crop.
     tile_idx: 0=NW, 1=NE, 2=SW, 3=SE
-    Returns (N, 3, 512, 512) in [-1, 1] on device.
+    Returns (N, 3, 512, 512) in [-1, 1] on device, or None if all images were too small.
     """
-    tile_names = ["NW", "NE", "SW", "SE"]
     assert 0 <= tile_idx <= 3, f"tile_idx must be 0-3, got {tile_idx}"
-    tensors = [make_tiles(p)[tile_idx] for p in paths]
+    tensors = []
+    for p in paths:
+        tiles = make_tiles(p)
+        if tiles:
+            tensors.append(tiles[tile_idx])
+    if not tensors:
+        return None
     return torch.stack(tensors).to(device, non_blocking=True)
 
 
