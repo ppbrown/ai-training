@@ -22,9 +22,12 @@ from train_datatools import (
     ImageReconDataset,
     parse_dataset_spec,
     load_tile_batch,
+    load_tile_jitter_batch,
+    load_jitter_batch,
     collate_path_tensor,
     write_vae_sample_webp,
 )
+
 from train_hard_region import HardRegionMiner
 from train_discriminator import (
     NLayerDiscriminator,
@@ -258,6 +261,37 @@ def disc_update(disc, opt_d, x, dec, args, step):
         opt_d.step()
 
 
+# Called by main training loop, to handle if we have any
+# "data enhancement" type flags enabled
+def iter_step_batches(
+    paths: list[Path],
+    pack: LoaderPack,
+    args,
+    device: torch.device,
+):
+    """
+    Yield all extra training batches for one main step:
+    tiles, jitter crops, or both combined.
+    """
+    jitter = getattr(args, "jitter", 0)
+
+    if args.hires_tiling:
+        n_jitter = (jitter + 1) ** 2
+        for tile_idx in range(4):
+            if jitter > 0:
+                for jitter_idx in range(n_jitter):
+                    batch = load_tile_jitter_batch(
+                            paths, tile_idx, jitter_idx, jitter, device)
+                    if batch is not None:
+                        yield batch
+            else:
+                batch = load_tile_batch(paths, tile_idx, device)
+                if batch is not None:
+                    yield batch
+    elif jitter > 0:
+        yield from load_jitter_batch(paths, pack.tw, pack.th, jitter)
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -366,12 +400,23 @@ def main() -> None:
             th=th,
         ))
 
-    opt = torch.optim.AdamW(
-        vae.parameters(),
-        lr=args.lr,
-        betas=(0.9, 0.999),
-        weight_decay=args.weight_decay,
-    )
+    optimizer_name = getattr(args, "optimizer", "adamw").lower()
+    if optimizer_name == "sgd":
+        opt = torch.optim.SGD(
+            vae.parameters(),
+            lr=args.lr,
+            momentum=getattr(args, "sgd_momentum", 0.0),
+            weight_decay=args.weight_decay,
+        )
+    elif optimizer_name == "adamw":
+        opt = torch.optim.AdamW(
+            vae.parameters(),
+            lr=args.lr,
+            betas=(0.9, 0.999),
+            weight_decay=args.weight_decay,
+        )
+    else:
+        raise SystemExit(f"Unsupported optimizer: {optimizer_name}")
 
     _, sample_tw, sample_th = parse_dataset_spec(args.dataset[0])
     sample_img_path = Path(args.sample_img) if args.sample_img else None
@@ -382,9 +427,6 @@ def main() -> None:
     last_log_t = time.perf_counter()
     last_log_step = 0
     step = 0
-
-    # Keep last logged loss values for display
-    log_l1 = log_lp = log_edge = log_lap = 0.0
 
     while step < args.train_steps:
         pack = random.choice(packs)
@@ -416,30 +458,22 @@ def main() -> None:
 
         step += 1
 
-        # ------------------------------------------------------------------
-        # Step B: tile passes (if tiling enabled)
-        # Each tile is a 512x512 native-resolution crop from the 1024x1024 version.
-        # NW=0, NE=1, SW=2, SE=3
-        # ------------------------------------------------------------------
-        if args.hires_tiling:
-            for tile_idx in range(4):
-                x_tile = load_tile_batch(paths, tile_idx, device)
-                if x_tile is None:
-                    continue  # all images in batch were too small, skip this tile
+        ###################################################################
+        # Step B: tile passes (if tiling enabled) or jitter-derived tiles
+        # or sometimes a combination of both
+        ###################################################################
+        for x_extra in iter_step_batches(paths, pack, args, device):
+            extra_loss, extra_dec, _, _, _, _ = compute_loss(
+                vae, x_extra, args, device, lpips_fn, lap_kernel, miner, disc, step,
+            )
+            opt.zero_grad(set_to_none=True)
+            extra_loss.backward()
+            opt.step()
+            if disc is not None:
+                disc_update(disc, opt_d, x_extra, extra_dec, args, step)
+            step += 1
 
-                tile_loss, tile_dec, _, _, _, _ = compute_loss(
-                    vae, x_tile, args, device, lpips_fn, lap_kernel, miner, disc, step,
-                )
-
-                opt.zero_grad(set_to_none=True)
-                tile_loss.backward()
-                opt.step()
-
-                if disc is not None:
-                    disc_update(disc, opt_d, x_tile, tile_dec, args, step)
-
-                step += 1
-
+        
         # ------------------------------------------------------------------
         # Logging
         # ------------------------------------------------------------------

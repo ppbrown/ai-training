@@ -23,18 +23,36 @@ def parseargs():
                     help="For scheduler purposes, skip this many steps."
                     " Tiled steps are not counted so factor x5 if using --hires_tiling.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
+
     ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
                     " Note1: This then counts 5 steps per image instead of 1."
                     " Note2: Hardcoded to rescale to 1024x1024 fullsize, then make 512x512 tiles.")
-    ap.add_argument("--bf16", action="store_true",)
+    ap.add_argument("--jitter", type=int, default=0,
+               help="Sub-pixel jitter amount in pixels (0=disabled, 2=recommended)")
+
+    ap.add_argument("--bf16", action="store_true", help="Allow mixed precision training")
     ap.add_argument("--allow_tf32", action="store_true",
                    help="Speed optimization. (Possibly bad at extremely low LR?)")
+
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
     ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+
+    ap.add_argument(
+        "--optimizer",
+        choices=["adamw", "sgd"],
+        default="adamw",
+        help="Optimizer for VAE training.",
+    )
+    ap.add_argument(
+        "--sgd_momentum",
+        type=float,
+        default=0.9,
+        help="Momentum for SGD optimizer.",
+    )
     ap.add_argument(
         "--weight_decay",
         type=float,
