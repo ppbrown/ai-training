@@ -62,7 +62,7 @@ def load_image_tensor(
     Load one image from disk, resize+crop, return (3, H, W) in [-1, 1].
     If jitter=0, returns a single tensor as before.
     If jitter>0, returns the center crop (offset 0,0) only — use
-    load_jitter_tensors() if you want all jitter crops.
+    load_jitter_batch() if you want all jitter crops.
     """
     img = Image.open(path).convert("RGB")
     img = resize_min_and_center_crop(img, target_w, target_h, jitter=0)
