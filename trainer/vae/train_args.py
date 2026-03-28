@@ -29,7 +29,7 @@ def parseargs():
                     " Note1: This then counts 5 steps per image instead of 1."
                     " Note2: Hardcoded to rescale to 1024x1024 fullsize, then make 512x512 tiles.")
     ap.add_argument("--jitter", type=int, default=0,
-               help="Sub-pixel jitter amount in pixels (0=disabled, 2=recommended)")
+               help="Expand each image to a batch of pixel shifted crops. N yields (N+1)^2 imgs. Try 1 or 2.")
 
     ap.add_argument("--bf16", action="store_true", help="Allow mixed precision training")
     ap.add_argument("--allow_tf32", action="store_true",

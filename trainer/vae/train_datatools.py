@@ -151,15 +151,25 @@ def load_tile_batch(
 
 
 def load_jitter_batch(
-    path: Path, target_w: int, target_h: int, jitter: int
+    paths: List[Path], target_w: int, target_h: int, jitter: int, device: torch.device
 ) -> List[torch.Tensor]:
     """
-    Load one image and return all jitter crops as a list of tensors (3, H, W).
-    Returns (jitter+1)^2 tensors.
+    Load a batch of images and return all jitter crops as a list of stacked batch tensors.
+    Returns (jitter+1)^2 tensors, each of shape (N, 3, target_h, target_w).
     """
-    img = Image.open(path).convert("RGB")
-    img = resize_min_and_center_crop(img, target_w, target_h, jitter=jitter)
-    return make_jitter_crops(img, target_w, target_h, jitter)
+    all_crops: list[list[torch.Tensor]] = []
+    for p in paths:
+        img = Image.open(p).convert("RGB")
+        img = resize_min_and_center_crop(img, target_w, target_h, jitter=jitter)
+        crops = make_jitter_crops(img, target_w, target_h, jitter)
+        all_crops.append(crops)
+
+    n_crops = (jitter + 1) ** 2
+    result = []
+    for i in range(n_crops):
+        batch = torch.stack([all_crops[j][i] for j in range(len(paths))])
+        result.append(batch.to(device, non_blocking=True))
+    return result
 
 
 

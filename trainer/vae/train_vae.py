@@ -289,7 +289,7 @@ def iter_step_batches(
                 if batch is not None:
                     yield batch
     elif jitter > 0:
-        yield from load_jitter_batch(paths, pack.tw, pack.th, jitter)
+        yield from load_jitter_batch(paths, pack.tw, pack.th, jitter, device)
 
 
 # -----------------------------
