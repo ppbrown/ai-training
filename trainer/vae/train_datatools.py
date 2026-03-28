@@ -56,7 +56,7 @@ def pil_to_tensor(img: Image.Image) -> torch.Tensor:
 
 
 def load_image_tensor(
-    path: Path, target_w: int, target_h: int, jitter: int = 0
+    path: Path, target_w: int, target_h: int
 ) -> torch.Tensor:
     """
     Load one image from disk, resize+crop, return (3, H, W) in [-1, 1].
@@ -65,7 +65,7 @@ def load_image_tensor(
     load_jitter_batch() if you want all jitter crops.
     """
     img = Image.open(path).convert("RGB")
-    img = resize_min_and_center_crop(img, target_w, target_h, jitter=0)
+    img = resize_min_and_center_crop(img, target_w, target_h)
     return pil_to_tensor(img)
 
 
