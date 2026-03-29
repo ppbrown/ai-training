@@ -26,16 +26,16 @@ from torch.utils.data import Dataset, DataLoader
 # -----------------------------
 
 def resize_min_and_center_crop(
-    img: Image.Image, target_w: int, target_h: int, jitter: int = 0
+    img: Image.Image, target_w: int, target_h: int, pixelshift: int = 0
 ) -> Image.Image:
     """
-    Scale image so shorter side covers target+jitter, then center crop to target+jitter.
-    If jitter=0, behaves exactly as before.
-    If jitter>0, returns an image of size (target_w+jitter, target_h+jitter)
-    suitable for make_jitter_crops().
+    Scale image so shorter side covers target+pixelshift, then center crop to target+pixelshift.
+    If pixelshift=0, behaves exactly as before.
+    If pixelshift>0, returns an image of size (target_w+pixelshift, target_h+pixelshift)
+    suitable for make_pixelshift_crops().
     """
-    actual_w = target_w + jitter
-    actual_h = target_h + jitter
+    actual_w = target_w + pixelshift
+    actual_h = target_h + pixelshift
     w, h = img.size
     scale = max(actual_w / w, actual_h / h)
     new_w = int(round(w * scale))
@@ -60,9 +60,6 @@ def load_image_tensor(
 ) -> torch.Tensor:
     """
     Load one image from disk, resize+crop, return (3, H, W) in [-1, 1].
-    If jitter=0, returns a single tensor as before.
-    If jitter>0, returns the center crop (offset 0,0) only — use
-    load_jitter_batch() if you want all jitter crops.
     """
     img = Image.open(path).convert("RGB")
     img = resize_min_and_center_crop(img, target_w, target_h)
@@ -103,15 +100,15 @@ def make_tiles(path: Path) -> List[torch.Tensor]:
     se = t[:, 512:, 512:]
     return [nw, ne, sw, se]
 
-def make_jitter_crops(img: Image.Image, target_w: int, target_h: int, jitter: int) -> List[torch.Tensor]:
+def make_pixelshift_crops(img: Image.Image, target_w: int, target_h: int, pixelshift: int) -> List[torch.Tensor]:
     """
-    Given an image of size (target_w+jitter, target_h+jitter), return all
-    (jitter+1)^2 crops of size (target_w, target_h) at every (dx, dy) offset.
-    For jitter=2: offsets (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2) -> 9 crops.
+    Given an image of size (target_w+pixelshift, target_h+pixelshift), return all
+    (pixelshift+1)^2 crops of size (target_w, target_h) at every (dx, dy) offset.
+    For pixelshift=2: offsets (0,0),(0,1),(0,2),(1,0),(1,1),(1,2),(2,0),(2,1),(2,2) -> 9 crops.
     """
     tensors = []
-    for dy in range(jitter + 1):
-        for dx in range(jitter + 1):
+    for dy in range(pixelshift + 1):
+        for dx in range(pixelshift + 1):
             crop = TVF.crop(img, top=dy, left=dx, height=target_h, width=target_w)
             tensors.append(pil_to_tensor(crop))
     return tensors
@@ -130,13 +127,11 @@ def load_batch(paths: List[Path], target_w: int, target_h: int, device: torch.de
 
 
 def load_tile_batch(
-    paths: List[Path], tile_idx: int, device: torch.device, jitter: int = 0
+    paths: List[Path], tile_idx: int, device: torch.device 
 ) -> torch.Tensor | None:
     """
     Load a list of image paths as a specific 512x512 tile from their 1024x1024 crop.
     tile_idx: 0=NW, 1=NE, 2=SW, 3=SE
-    If jitter>0, each tile is the (0,0) jitter crop of the (512+jitter)x(512+jitter)
-    oversized tile — use load_tile_jitter_batch() to get all jitter crops per tile.
     Returns (N, 3, 512, 512) in [-1, 1] on device, or None if all images were too small.
     """
     assert 0 <= tile_idx <= 3, f"tile_idx must be 0-3, got {tile_idx}"
@@ -150,21 +145,21 @@ def load_tile_batch(
     return torch.stack(tensors).to(device, non_blocking=True)
 
 
-def load_jitter_batch(
-    paths: List[Path], target_w: int, target_h: int, jitter: int, device: torch.device
+def load_pixelshift_batch(
+    paths: List[Path], target_w: int, target_h: int, pixelshift: int, device: torch.device
 ) -> List[torch.Tensor]:
     """
-    Load a batch of images and return all jitter crops as a list of stacked batch tensors.
-    Returns (jitter+1)^2 tensors, each of shape (N, 3, target_h, target_w).
+    Load a batch of images and return all pixelshift crops as a list of stacked batch tensors.
+    Returns (pixelshift+1)^2 tensors, each of shape (N, 3, target_h, target_w).
     """
     all_crops: list[list[torch.Tensor]] = []
     for p in paths:
         img = Image.open(p).convert("RGB")
-        img = resize_min_and_center_crop(img, target_w, target_h, jitter=jitter)
-        crops = make_jitter_crops(img, target_w, target_h, jitter)
+        img = resize_min_and_center_crop(img, target_w, target_h, pixelshift=pixelshift)
+        crops = make_pixelshift_crops(img, target_w, target_h, pixelshift)
         all_crops.append(crops)
 
-    n_crops = (jitter + 1) ** 2
+    n_crops = (pixelshift + 1) ** 2
     result = []
     for i in range(n_crops):
         batch = torch.stack([all_crops[j][i] for j in range(len(paths))])
@@ -173,19 +168,19 @@ def load_jitter_batch(
 
 
 
-## Special case if both tile and jitter are requested
-def load_tile_jitter_batch(
-    paths: List[Path], tile_idx: int, jitter_idx: int, jitter: int, device: torch.device
+## Special case if both tile and pixelshift are requested
+def load_tile_pixelshift_batch(
+    paths: List[Path], tile_idx: int, pixelshift_idx: int, pixelshift: int, device: torch.device
 ) -> torch.Tensor | None:
     """
-    Load a specific jitter crop of a specific tile for a batch of images.
+    Load a specific pixelshift crop of a specific tile for a batch of images.
     tile_idx: 0-3 (NW/NE/SW/SE)
-    jitter_idx: 0..(jitter+1)^2-1, row-major order (dy outer, dx inner)
+    pixelshift_idx: 0..(pixelshift+1)^2-1, row-major order (dy outer, dx inner)
     Returns (N, 3, 512, 512) on device, or None if all images too small.
     """
     assert 0 <= tile_idx <= 3
-    dy = jitter_idx // (jitter + 1)
-    dx = jitter_idx % (jitter + 1)
+    dy = pixelshift_idx // (pixelshift + 1)
+    dx = pixelshift_idx % (pixelshift + 1)
     tensors = []
     for p in paths:
         img = Image.open(p).convert("RGB")
@@ -194,25 +189,25 @@ def load_tile_jitter_batch(
         if short_edge < 1024:
             continue
         if short_edge >= 2048:
-            img = resize_min_and_center_crop(img, 1024, 1024, jitter=0)
+            img = resize_min_and_center_crop(img, 1024, 1024, pixelshift=0)
         else:
             left = (w - 1024) // 2
             top = (h - 1024) // 2
             img = TVF.crop(img, top=top, left=left, height=1024, width=1024)
         # Now split into oversized tiles
-        # Each quadrant is 512+jitter, so we need 1024+jitter total
-        # Re-get with jitter padding per quadrant by cropping directly
+        # Each quadrant is 512+pixelshift, so we need 1024+pixelshift total
+        # Re-get with pixelshift padding per quadrant by cropping directly
         t = pil_to_tensor(img)  # (3, 1024, 1024)
         # quadrant origins in the 1024x1024
         origins = [(0, 0), (0, 512), (512, 0), (512, 512)]  # (top, left) for NW/NE/SW/SE
         qt, ql = origins[tile_idx]
         # Extract oversized quadrant, clamping to image bounds
-        qh = min(512 + jitter, 1024 - qt)
-        qw = min(512 + jitter, 1024 - ql)
+        qh = min(512 + pixelshift, 1024 - qt)
+        qw = min(512 + pixelshift, 1024 - ql)
         quad = t[:, qt:qt+qh, ql:ql+qw]
         if qh < 512 or qw < 512:
             continue  # not enough pixels for even one crop
-        # Apply jitter crop
+        # Apply pixelshift crop
         crop = quad[:, dy:dy+512, dx:dx+512]
         if crop.shape[1] == 512 and crop.shape[2] == 512:
             tensors.append(crop)

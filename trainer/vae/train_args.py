@@ -28,7 +28,7 @@ def parseargs():
                     help="Presuming high res dataset, add additional 4x highres tile processing."
                     " Note1: This then counts 5 steps per image instead of 1."
                     " Note2: Hardcoded to rescale to 1024x1024 fullsize, then make 512x512 tiles.")
-    ap.add_argument("--jitter", type=int, default=0,
+    ap.add_argument("--pixel_shift", type=int, default=0,
                help="Expand each image to a batch of pixel shifted crops. N yields (N+1)^2 imgs. Try 1 or 2.")
 
     ap.add_argument("--bf16", action="store_true", help="Allow mixed precision training")

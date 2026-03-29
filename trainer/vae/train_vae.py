@@ -22,8 +22,8 @@ from train_datatools import (
     ImageReconDataset,
     parse_dataset_spec,
     load_tile_batch,
-    load_tile_jitter_batch,
-    load_jitter_batch,
+    load_tile_pixelshift_batch,
+    load_pixelshift_batch,
     collate_path_tensor,
     write_vae_sample_webp,
 )
@@ -271,25 +271,25 @@ def iter_step_batches(
 ):
     """
     Yield all extra training batches for one main step:
-    tiles, jitter crops, or both combined.
+    tiles, pixelshift crops, or both combined.
     """
-    jitter = getattr(args, "jitter", 0)
+    pixelshift = getattr(args, "pixel_shift", 0)
 
     if args.hires_tiling:
-        n_jitter = (jitter + 1) ** 2
+        n_pixelshift = (pixelshift + 1) ** 2
         for tile_idx in range(4):
-            if jitter > 0:
-                for jitter_idx in range(n_jitter):
-                    batch = load_tile_jitter_batch(
-                            paths, tile_idx, jitter_idx, jitter, device)
+            if pixelshift > 0:
+                for pixelshift_idx in range(n_pixelshift):
+                    batch = load_tile_pixelshift_batch(
+                            paths, tile_idx, pixelshift_idx, pixelshift, device)
                     if batch is not None:
                         yield batch
             else:
                 batch = load_tile_batch(paths, tile_idx, device)
                 if batch is not None:
                     yield batch
-    elif jitter > 0:
-        yield from load_jitter_batch(paths, pack.tw, pack.th, jitter, device)
+    elif pixelshift > 0:
+        yield from load_pixelshift_batch(paths, pack.tw, pack.th, pixelshift, device)
 
 
 # -----------------------------
@@ -459,7 +459,7 @@ def main() -> None:
         step += 1
 
         ###################################################################
-        # Step B: tile passes (if tiling enabled) or jitter-derived tiles
+        # Step B: tile passes (if tiling enabled) or pixelshift-derived tiles
         # or sometimes a combination of both
         ###################################################################
         for x_extra in iter_step_batches(paths, pack, args, device):
