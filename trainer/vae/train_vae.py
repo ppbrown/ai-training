@@ -39,9 +39,45 @@ from train_discriminator import (
 from diffusers import AutoencoderKL
 
 
+import torchvision.models as tvm
+
 # -----------------------------
 # Loss helpers
 # -----------------------------
+
+vgg_slices: list | None = None
+
+def build_vgg_gram(device: torch.device):
+    """Load VGG16 and return a function that extracts features for Gram loss."""
+    vgg = tvm.vgg16(weights=tvm.VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
+    for p in vgg.parameters():
+        p.requires_grad_(False)
+    # Slices ending at relu1_2, relu2_2, relu3_3, relu4_3
+    slices = [
+        torch.nn.Sequential(*list(vgg.children())[:4]),   # relu1_2
+        torch.nn.Sequential(*list(vgg.children())[:9]),   # relu2_2
+        torch.nn.Sequential(*list(vgg.children())[:16]),  # relu3_3
+        torch.nn.Sequential(*list(vgg.children())[:23]),  # relu4_3
+    ]
+    return slices
+
+
+def gram_matrix(x: torch.Tensor) -> torch.Tensor:
+    B, C, H, W = x.shape
+    f = x.view(B, C, H * W)
+    return torch.bmm(f, f.transpose(1, 2)) / (C * H * W)
+
+
+def compute_gram_loss(vgg_slices, dec: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    loss = torch.tensor(0.0, device=dec.device)
+    feat_dec = dec
+    feat_x = x
+    for slice_ in vgg_slices:
+        feat_dec = slice_(feat_dec)
+        feat_x = slice_(feat_x)
+        loss = loss + F.l1_loss(gram_matrix(feat_dec), gram_matrix(feat_x.detach()))
+    return loss
+
 
 def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
     """
@@ -198,6 +234,11 @@ def compute_loss(
             lap_x = F.conv2d(x, lap_kernel, padding=1, groups=3)
         lap_loss = F.l1_loss(lap_dec, lap_x)
 
+    gram_loss_val = None
+    if vgg_slices is not None:
+        gram_loss_val = compute_gram_loss(vgg_slices, dec, x)
+        loss = loss + args.gram_weight * gram_loss_val
+
     hf_energy_loss = None
     if args.hf_energy_weight > 0:
         hf_energy_loss = F.l1_loss(hf_fft_dec.square(), hf_fft_x.square())
@@ -336,6 +377,12 @@ def main() -> None:
         lpips_fn.eval()
         for p in lpips_fn.parameters():
             p.requires_grad_(False)
+
+    vgg_slices = None
+    if args.gram_weight > 0:
+        print(f"Using Gram matrix loss weight={args.gram_weight}")
+        vgg_slices = build_vgg_gram(device)
+
 
     lap_kernel = None
     if args.laplacian_weight != 0:
