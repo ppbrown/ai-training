@@ -74,6 +74,8 @@ def parseargs():
                     help="high quality but high cost. Range 0.2 - 0.05")
     ap.add_argument("--lpips_shapeonly", action="store_true",
                     help="Compute LPIPS on shape only, ignoring color matching")
+    ap.add_argument("--lpips_rawvgg", action="store_true",
+                    help="Use LPIPS module but set lpips=False. Which oddly, gives you 'raw VGG'")
     ap.add_argument(
         "--hf_luma_only", action="store_true",
         help="Compute edge/laplacian losses on luma (Y) only"

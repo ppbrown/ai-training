@@ -332,7 +332,7 @@ def main() -> None:
     lpips_fn = None
     if args.lpips_weight > 0:
         print(f"Using LPIPS at {args.lpips_weight}" + (" (shape only)" if args.lpips_shapeonly else ""))
-        lpips_fn = lpips.LPIPS(net="vgg").to(device)
+        lpips_fn = lpips.LPIPS(net="vgg", lpips=(not args.lpips_rawvgg)).to(device)
         lpips_fn.eval()
         for p in lpips_fn.parameters():
             p.requires_grad_(False)
