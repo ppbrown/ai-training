@@ -77,7 +77,7 @@ def parseargs():
     ap.add_argument("--lpips_rawvgg", action="store_true",
                     help="Use LPIPS module but set lpips=False. Which oddly, gives you 'raw VGG'")
 
-    p.add_argument("--gram_weight", type=float, default=0.0,
+    ap.add_argument("--gram_weight", type=float, default=0.0,
                help="Gram matrix texture loss weight (0=disabled)")
 
     ap.add_argument(
