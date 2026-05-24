@@ -30,10 +30,8 @@ Output layout:
             ...
 
 Library usage:
-    from split_vae import split_vae, load_split, ChannelMaskedVAE
+    from split_vae import split_vae, ChannelMaskedVAE
     vae_lf, vae_hf = split_vae("path/to/phase4_ckpt", split_at=16)
-    # or after saving:
-    vae_lf, vae_hf = load_split("output_dir")
 """
 
 from __future__ import annotations
@@ -157,26 +155,6 @@ def save_split(
             "active_channels": wrapper.active_indices.tolist(),
         }
         (sub / "split_config.json").write_text(json.dumps(config, indent=2))
-
-
-def load_split(
-    in_dir: str | Path,
-) -> tuple[ChannelMaskedVAE, ChannelMaskedVAE]:
-    """Reconstruct both wrappers from a directory produced by save_split()."""
-    in_dir = Path(in_dir)
-    wrappers = []
-    for name in ("model_lf", "model_hf"):
-        sub = in_dir / name
-        base = AutoencoderKL.from_pretrained(str(sub))
-        config = json.loads((sub / "split_config.json").read_text())
-        wrappers.append(
-            ChannelMaskedVAE(
-                base,
-                active_channels=torch.as_tensor(config["active_channels"], dtype=torch.long),
-                latent_channels=config["latent_channels"],
-            )
-        )
-    return wrappers[0], wrappers[1]
 
 
 def verify_split(
