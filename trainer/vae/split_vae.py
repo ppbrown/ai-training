@@ -3,12 +3,12 @@
 """
 split_vae.py
 
-Split a trained AutoencoderKL checkpoint into two ready-to-train specialist
-variants that mask complementary halves of the latent channel space.
+Split a trained AutoencoderKL checkpoint into N ready-to-train specialist
+variants that mask equal-sized, non-overlapping slices of the latent channel
+space.  The number of splits is determined by the postfix list; latent_channels
+must be evenly divisible by len(postfixes) or the script aborts with an error.
 
-The intent is to train one half for high frequency image data, and other
-half for low frequency, so resulting modules will be called model_hf
-and model_lf
+Default postfixes are ["lf", "hf"] (low-frequency / high-frequency halves).
 
 The wrapper applies its channel mask defensively in decode() and forward(),
 so training loops that call either the full forward pass or encode/decode
@@ -19,19 +19,20 @@ sample before the decoder sees it.
 
 CLI usage:
     python split_vae.py CHECKPOINT_PATH -o OUTPUT_DIR
-    python split_vae.py CHECKPOINT_PATH -o OUTPUT_DIR --split-at 16 --verify
+    python split_vae.py CHECKPOINT_PATH -o OUTPUT_DIR --postfixes lf hf --verify
+    python split_vae.py CHECKPOINT_PATH -o OUTPUT_DIR --postfixes a b c d
 
-Output layout:
+Output layout (example with default ["lf", "hf"] and 32 channels):
     OUTPUT_DIR/
-        model_lf/                          (active channels [0, split_at))
+        model_lf/                          (active channels [0, 16))
             config.json, *.safetensors     <- diffusers AutoencoderKL files
             split_config.json              <- mask metadata sidecar
-        model_hf/                          (active channels [split_at, latent_channels))
+        model_hf/                          (active channels [16, 32))
             ...
 
 Library usage:
     from split_vae import split_vae, ChannelMaskedVAE
-    vae_lf, vae_hf = split_vae("path/to/phase4_ckpt", split_at=16)
+    vaes = split_vae("path/to/phase4_ckpt", postfixes=["lf", "hf"])
 """
 
 from __future__ import annotations
@@ -102,57 +103,89 @@ class ChannelMaskedVAE(nn.Module):
 def split_vae(
     checkpoint_path: str | Path,
     latent_channels: int = 32,
-    split_at: int = 16,
-) -> tuple[ChannelMaskedVAE, ChannelMaskedVAE]:
+    postfixes: list[str] | None = None,
+) -> list[ChannelMaskedVAE]:
     """
-    Load two independent copies of an AutoencoderKL checkpoint and return
-    masked wrappers.
+    Load one independent copy of an AutoencoderKL checkpoint per postfix and
+    return masked wrappers with evenly divided channel slices.
 
-    Returns:
-        (vae_lf, vae_hf):
-            - vae_lf has channels [0, split_at) active.
-            - vae_hf has channels [split_at, latent_channels) active.
+    Raises ValueError if latent_channels is not evenly divisible by
+    len(postfixes).
 
-    Both are intended to be trained on the FULL image with the existing loss
-    combo. The masking enforces capacity allocation; the loss combo
-    (lpips_rawvgg + laplacian + disc) drives HF specialization in the HF
-    half once LF reconstruction plateaus under reduced channel capacity.
+    Returns a list of ChannelMaskedVAE, one per postfix, with channels
+    [i*chunk, (i+1)*chunk) active for the i-th entry.
     """
+    if postfixes is None:
+        postfixes = ["lf", "hf"]
+    n = len(postfixes)
+    if latent_channels % n != 0:
+        raise ValueError(
+            f"latent_channels={latent_channels} is not evenly divisible by "
+            f"{n} postfixes"
+        )
+    chunk = latent_channels // n
     checkpoint_path = Path(checkpoint_path)
-    base_lf = AutoencoderKL.from_pretrained(str(checkpoint_path))
-    base_hf = AutoencoderKL.from_pretrained(str(checkpoint_path))
+    wrappers = []
+    for i in range(n):
+        base = AutoencoderKL.from_pretrained(str(checkpoint_path))
+        w = ChannelMaskedVAE(
+            base,
+            active_channels=slice(i * chunk, (i + 1) * chunk),
+            latent_channels=latent_channels,
+        )
+        wrappers.append(w)
+    return wrappers
 
-    vae_lf = ChannelMaskedVAE(
-        base_lf,
-        active_channels=slice(0, split_at),
-        latent_channels=latent_channels,
-    )
-    vae_hf = ChannelMaskedVAE(
-        base_hf,
-        active_channels=slice(split_at, latent_channels),
-        latent_channels=latent_channels,
-    )
-    return vae_lf, vae_hf
+
+def _zero_inactive_channels(vae: AutoencoderKL, active: list[int], latent: int) -> None:
+    """
+    Zero the channel-aligned weights for every latent channel NOT in `active`.
+
+    Encoder-side layers (encoder.conv_out, quant_conv) own their inactive
+    channels via output rows; both the mean band [0, latent) and the logvar
+    band [latent, 2*latent) are zeroed.
+
+    Decoder-side layers (post_quant_conv, decoder.conv_in) own their inactive
+    channels via input columns.
+    """
+    inactive = sorted(set(range(latent)) - set(active))
+    if not inactive:
+        return
+    inactive_t = torch.tensor(inactive, dtype=torch.long)
+    enc_rows = torch.cat([inactive_t, inactive_t + latent])
+    with torch.no_grad():
+        vae.encoder.conv_out.weight[enc_rows] = 0.0
+        if vae.encoder.conv_out.bias is not None:
+            vae.encoder.conv_out.bias[enc_rows] = 0.0
+        vae.quant_conv.weight[enc_rows] = 0.0
+        if vae.quant_conv.bias is not None:
+            vae.quant_conv.bias[enc_rows] = 0.0
+        vae.post_quant_conv.weight[:, inactive_t] = 0.0
+        vae.decoder.conv_in.weight[:, inactive_t] = 0.0
 
 
 def save_split(
-    vae_lf: ChannelMaskedVAE,
-    vae_hf: ChannelMaskedVAE,
+    wrappers: list[ChannelMaskedVAE],
+    postfixes: list[str],
     out_dir: str | Path,
 ) -> None:
     """
-    Save each wrapper as a standard diffusers AutoencoderKL directory plus a
-    split_config.json sidecar containing the mask metadata. The base VAE
-    files in each subdirectory remain loadable by any stock diffusers code.
+    Zero inactive channel weights in each wrapper's VAE, then save as a
+    standard diffusers AutoencoderKL directory plus a split_config.json
+    sidecar. The saved weights have inactive channels physically zeroed so
+    the model behaves correctly when loaded without the ChannelMaskedVAE
+    wrapper.
     """
     out_dir = Path(out_dir)
-    for name, wrapper in [("model_lf", vae_lf), ("model_hf", vae_hf)]:
-        sub = out_dir / name
+    for postfix, wrapper in zip(postfixes, wrappers):
+        sub = out_dir / f"model_{postfix}"
         sub.mkdir(parents=True, exist_ok=True)
+        active = wrapper.active_indices.tolist()
+        _zero_inactive_channels(wrapper.vae, active, wrapper.latent_channels)
         wrapper.vae.save_pretrained(sub)
         config = {
             "latent_channels": wrapper.latent_channels,
-            "active_channels": wrapper.active_indices.tolist(),
+            "active_channels": active,
         }
         (sub / "split_config.json").write_text(json.dumps(config, indent=2))
 
@@ -207,10 +240,13 @@ def main() -> int:
         help="Output directory. Will contain model_lf/ and model_hf/ subdirs.",
     )
     ap.add_argument(
-        "--split-at",
-        type=int,
-        default=16,
-        help="Channel index at which to split. Default 16 (32-channel latent halved).",
+        "--postfixes",
+        nargs="+",
+        default=["lf", "hf"],
+        metavar="NAME",
+        help="List of name postfixes, one per split (e.g. lf hf). "
+             "Channels are divided evenly; latent_channels must be divisible "
+             "by the number of postfixes. Default: lf hf",
     )
     ap.add_argument(
         "--latent-channels",
@@ -225,36 +261,40 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not (0 < args.split_at < args.latent_channels):
+    n = len(args.postfixes)
+    if args.latent_channels % n != 0:
         print(
-            f"error: --split-at must be in (0, {args.latent_channels}), got {args.split_at}",
+            f"error: --latent-channels {args.latent_channels} is not evenly "
+            f"divisible by {n} postfixes",
             file=sys.stderr,
         )
         return 2
 
-    print(f"loading base VAE from {args.checkpoint} (twice)...")
-    vae_lf, vae_hf = split_vae(
+    chunk = args.latent_channels // n
+    print(f"loading base VAE from {args.checkpoint} ({n} copies)...")
+    wrappers = split_vae(
         checkpoint_path=args.checkpoint,
         latent_channels=args.latent_channels,
-        split_at=args.split_at,
+        postfixes=args.postfixes,
     )
 
     if args.verify:
         print("verifying mask application...")
         x = torch.randn(1, 3, 64, 64)
-        for name, w in [("lf", vae_lf), ("hf", vae_hf)]:
+        for postfix, w in zip(args.postfixes, wrappers):
             diag = verify_split(w, x)
             print(
-                f"  {name}: active={diag['active_channels']}, "
+                f"  {postfix}: active={diag['active_channels']}, "
                 f"masked_max_abs={diag['masked_max_abs']:.2e}, "
                 f"active_mean_abs={diag['active_mean_abs']:.4f}"
             )
 
     out_dir = Path(args.out_dir)
     print(f"saving to {out_dir}...")
-    save_split(vae_lf, vae_hf, out_dir)
-    print(f"  {out_dir}/model_lf: channels [0, {args.split_at}) active")
-    print(f"  {out_dir}/model_hf: channels [{args.split_at}, {args.latent_channels}) active")
+    save_split(wrappers, args.postfixes, out_dir)
+    for i, postfix in enumerate(args.postfixes):
+        lo, hi = i * chunk, (i + 1) * chunk
+        print(f"  {out_dir}/model_{postfix}: channels [{lo}, {hi}) active")
     print("done.")
     return 0
 

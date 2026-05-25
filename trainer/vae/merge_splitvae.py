@@ -1,11 +1,16 @@
 #!/bin/env python3
 
 """
-merge_vae.py
+merge_splitvae.py
 
-Merge two channel-masked specialist VAEs (produced by split_vae.py and then
-trained independently) into a single standard AutoencoderKL ready for polish
-training.
+Merge any number of channel-masked specialist VAEs (produced by split_vae.py
+and then trained independently) into a single standard AutoencoderKL ready for
+polish training.
+
+All model_* subdirectories in SPLIT_DIR that contain a split_config.json are
+discovered automatically.  The script reports how many specialist models were
+found, which channel ranges each owns, and which channels (if any) have no
+specialist coverage.
 
 Conceptual model
 ----------------
@@ -16,14 +21,15 @@ An AutoencoderKL's weights split into two categories:
     upblocks, mid blocks, all norms) falls into this category.
 
   - "Channel-aligned" weights have at least one dimension whose index
-    corresponds directly to a specific latent channel. For latent channel n,
-    these are the weights that produce or consume channel n of the latent.
+    corresponds directly to a specific latent channel.
 
 The merge rule is:
 
   - Backbone weights -> from --base (one source, chosen by the user).
-  - Channel-aligned weights for channel n -> from whichever specialist
-    owns channel n (vae_lf owns [0, split_at), vae_hf owns [split_at, latent)).
+  - Channel-aligned weights -> rebuilt by summing all specialists.
+    split_vae.py physically zeroes inactive channels in each specialist
+    before saving, so a simple element-wise sum places every specialist's
+    trained weights in the correct positions with no per-channel indexing.
 
 Where the channel-aligned weights live
 --------------------------------------
@@ -41,31 +47,17 @@ aligned weights:
 
 Every other layer is backbone.
 
-Note: quant_conv and post_quant_conv are 1x1 convs whose BOTH dims are
-latent-aligned. For a weight element W[i, j] where i and j have different
-owners (one from lf, one from hf), there's no clean per-channel assignment.
-The implementation uses output-dim ownership for encoder-side layers and
-input-dim ownership for decoder-side layers, so cross-owned elements come
-from the row or column source respectively. These layers are typically
-near-identity in trained VAEs, so off-diagonal mass is small and the choice
-matters little in practice.
-
 The --base choice
 -----------------
-  "hf":  use vae_hf as the base. Encoder backbone is HF-trained, so the
-         HF-owned channels stay internally consistent end-to-end; only the
-         LF-owned channels are operating on a backbone they weren't quite
-         trained against. Recommended when HF fidelity is the priority.
-  "lf":  mirror.
-  PATH:  external checkpoint (e.g. the original model before split). 
-         Both halves get equal representational drift from their training
-         and polish has to reconcile both.
+  NAME:  postfix of one of the discovered specialists (e.g. "lf", "hf").
+         That specialist's full checkpoint is used for backbone weights.
+  PATH:  external checkpoint (e.g. the original model before split).
 
 CLI usage
 ---------
-    python merge_vae.py SPLIT_DIR -o OUTPUT_DIR
-    python merge_vae.py SPLIT_DIR -o OUTPUT_DIR --base lf
-    python merge_vae.py SPLIT_DIR -o OUTPUT_DIR --base /path/to/phase4
+    python merge_splitvae.py SPLIT_DIR -o OUTPUT_DIR
+    python merge_splitvae.py SPLIT_DIR -o OUTPUT_DIR --base lf
+    python merge_splitvae.py SPLIT_DIR -o OUTPUT_DIR --base /path/to/phase4
 """
 
 from __future__ import annotations
@@ -76,150 +68,249 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from diffusers import AutoencoderKL
 
 
-def _splice_encoder_layer(
-    target: nn.Conv2d,
-    lf: nn.Conv2d,
-    hf: nn.Conv2d,
-    split_at: int,
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _channel_ranges(channels: list[int]) -> list[str]:
+    """Return compact range strings for a sorted list of channel indices."""
+    if not channels:
+        return []
+    channels = sorted(channels)
+    ranges: list[str] = []
+    start = end = channels[0]
+    for ch in channels[1:]:
+        if ch == end + 1:
+            end = ch
+        else:
+            ranges.append(f"{start}-{end}" if start != end else str(start))
+            start = end = ch
+    ranges.append(f"{start}-{end}" if start != end else str(start))
+    return ranges
+
+
+def _format_ranges(channels: list[int]) -> str:
+    return ", ".join(_channel_ranges(channels))
+
+
+def _format_zero_ranges(channels: list[int]) -> str:
+    return ", ".join(f"{r}==0" for r in _channel_ranges(channels))
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+Specialist = tuple[str, AutoencoderKL, list[int]]  # (dir_name, model, active_channels)
+
+
+def load_specialists(split_dir: Path) -> tuple[int, list[Specialist]]:
+    """
+    Discover all model_* subdirs in split_dir that contain split_config.json,
+    load each AutoencoderKL, and return (latent_channels, specialists) sorted
+    by first active channel.
+
+    Raises FileNotFoundError if none are found, ValueError if latent_channels
+    disagrees across models.
+    """
+    dirs = sorted(
+        p for p in split_dir.iterdir()
+        if p.is_dir() and (p / "split_config.json").exists()
+    )
+    if not dirs:
+        raise FileNotFoundError(f"No specialist models (model_*/split_config.json) found in {split_dir}")
+
+    specialists: list[Specialist] = []
+    latent: int | None = None
+    for d in dirs:
+        cfg = json.loads((d / "split_config.json").read_text())
+        lc = cfg["latent_channels"]
+        if latent is None:
+            latent = lc
+        elif lc != latent:
+            raise ValueError(
+                f"{d.name}: latent_channels={lc} disagrees with earlier value {latent}"
+            )
+        model = AutoencoderKL.from_pretrained(str(d))
+        active = sorted(cfg["active_channels"])
+        specialists.append((d.name, model, active))
+
+    specialists.sort(key=lambda s: s[2][0] if s[2] else 0)
+    return latent, specialists
+
+
+# ---------------------------------------------------------------------------
+# Splice
+# ---------------------------------------------------------------------------
+
+def _splice_channel_aligned_layers(
+    merged: AutoencoderKL,
+    specialists: list[Specialist],
     latent: int,
 ) -> None:
     """
-    Splice by OUTPUT channel for an encoder-side conv whose output is
-    interpreted as (mean[0:latent], logvar[0:latent]).
+    Rebuild the four channel-aligned layers in merged by zeroing them and
+    then summing contributions from all specialists.
+
+    Because split_vae.py physically zeroes inactive channels before saving,
+    each specialist contributes non-zero values only for its own channels.
+    The sum therefore assembles the correct weights for every channel with
+    no per-channel index arithmetic.
+
+    Decoder-side biases (post_quant_conv.bias, decoder.conv_in.bias) are
+    indexed by decoder output features, not latent channels, so they are
+    preserved unchanged from the base model.
     """
+    # Save decoder biases before we zero the layers.
+    pqc_bias = (merged.post_quant_conv.bias.clone()
+                if merged.post_quant_conv.bias is not None else None)
+    dec_bias = (merged.decoder.conv_in.bias.clone()
+                if merged.decoder.conv_in.bias is not None else None)
+
     with torch.no_grad():
-        # Means: output channels [0, latent)
-        target.weight[:split_at].copy_(lf.weight[:split_at])
-        target.weight[split_at:latent].copy_(hf.weight[split_at:latent])
-        # Logvars: output channels [latent, 2*latent)
-        target.weight[latent:latent + split_at].copy_(lf.weight[latent:latent + split_at])
-        target.weight[latent + split_at:2 * latent].copy_(hf.weight[latent + split_at:2 * latent])
-        if target.bias is not None:
-            target.bias[:split_at].copy_(lf.bias[:split_at])
-            target.bias[split_at:latent].copy_(hf.bias[split_at:latent])
-            target.bias[latent:latent + split_at].copy_(lf.bias[latent:latent + split_at])
-            target.bias[latent + split_at:2 * latent].copy_(hf.bias[latent + split_at:2 * latent])
+        for layer in (
+            merged.encoder.conv_out,
+            merged.quant_conv,
+            merged.post_quant_conv,
+            merged.decoder.conv_in,
+        ):
+            layer.weight.zero_()
+            if layer.bias is not None:
+                layer.bias.zero_()
+
+        for _, model, _ in specialists:
+            merged.encoder.conv_out.weight.add_(model.encoder.conv_out.weight)
+            merged.quant_conv.weight.add_(model.quant_conv.weight)
+            merged.post_quant_conv.weight.add_(model.post_quant_conv.weight)
+            merged.decoder.conv_in.weight.add_(model.decoder.conv_in.weight)
+            if merged.encoder.conv_out.bias is not None:
+                merged.encoder.conv_out.bias.add_(model.encoder.conv_out.bias)
+            if merged.quant_conv.bias is not None:
+                merged.quant_conv.bias.add_(model.quant_conv.bias)
+
+        # Restore decoder biases from base.
+        if pqc_bias is not None:
+            merged.post_quant_conv.bias.copy_(pqc_bias)
+        if dec_bias is not None:
+            merged.decoder.conv_in.bias.copy_(dec_bias)
 
 
-def _splice_decoder_layer(
-    target: nn.Conv2d,
-    lf: nn.Conv2d,
-    hf: nn.Conv2d,
-    split_at: int,
-    latent: int,
-) -> None:
-    """
-    Splice by INPUT channel for a decoder-side conv whose input channels
-    are the latent channels.
-    """
-    with torch.no_grad():
-        target.weight[:, :split_at].copy_(lf.weight[:, :split_at])
-        target.weight[:, split_at:latent].copy_(hf.weight[:, split_at:latent])
-        # Bias is per output channel, unaffected by input-channel splicing.
-
+# ---------------------------------------------------------------------------
+# Merge
+# ---------------------------------------------------------------------------
 
 def merge_split(
     split_dir: str | Path,
     base: str | Path = "hf",
 ) -> AutoencoderKL:
     """
-    Merge a split_dir produced by split_vae.py into a single AutoencoderKL.
+    Discover all specialist models in split_dir, report coverage, and merge
+    their channel-aligned weights into a single AutoencoderKL.
 
     Args:
-        split_dir: directory containing model_lf/ and model_hf/ subdirs.
-        base: source for non-spliced weights. One of:
-            - "lf": use vae_lf's full checkpoint as the base.
-            - "hf": use vae_hf's full checkpoint as the base.
-            - PATH: path to another diffusers AutoencoderKL checkpoint.
+        split_dir: directory produced by split_vae.py containing model_*/ subdirs.
+        base: source for backbone (non-channel-aligned) weights. Either the
+              postfix of a discovered specialist (e.g. "lf", "hf") or the
+              full name of a subdir (e.g. "model_lf"), or a path to another
+              diffusers AutoencoderKL checkpoint.
 
     Returns:
-        A single AutoencoderKL with:
-            - latent channels [0, split_at) routed via vae_lf's projection
-            - latent channels [split_at, latent) routed via vae_hf's projection
-            - everything else inherited from `base`
+        Merged AutoencoderKL with channel-aligned layers spliced from
+        the appropriate specialist for each channel.
     """
     split_dir = Path(split_dir)
-    lf_dir = split_dir / "model_lf"
-    hf_dir = split_dir / "model_hf"
+    latent, specialists = load_specialists(split_dir)
 
-    lf = AutoencoderKL.from_pretrained(str(lf_dir))
-    hf = AutoencoderKL.from_pretrained(str(hf_dir))
+    n = len(specialists)
+    print(f"Found {n} specialist model{'s' if n != 1 else ''}:")
+    all_active: set[int] = set()
+    for name, _, active in specialists:
+        print(f"  {name}: channels {_format_ranges(active)}")
+        all_active.update(active)
 
-    lf_cfg = json.loads((lf_dir / "split_config.json").read_text())
-    hf_cfg = json.loads((hf_dir / "split_config.json").read_text())
-    latent = lf_cfg["latent_channels"]
-    assert hf_cfg["latent_channels"] == latent, "lf/hf disagree on latent_channels"
+    zero = sorted(set(range(latent)) - all_active)
+    if zero:
+        print(f"  Uncovered channels: {_format_zero_ranges(zero)}")
+    else:
+        print("  All channels covered.")
 
-    lf_active = sorted(lf_cfg["active_channels"])
-    hf_active = sorted(hf_cfg["active_channels"])
-    # Require the standard contiguous-low / contiguous-high split. If you want
-    # a fancier split pattern, rewrite the splice helpers.
-    assert lf_active == list(range(0, len(lf_active))), (
-        f"lf active channels must be contiguous [0, k), got {lf_active}"
-    )
-    assert hf_active == list(range(len(lf_active), latent)), (
-        f"hf active channels must be contiguous [k, latent), got {hf_active}"
-    )
-    split_at = len(lf_active)
-
-    if base == "lf":
-        merged = AutoencoderKL.from_pretrained(str(lf_dir))
-    elif base == "hf":
-        merged = AutoencoderKL.from_pretrained(str(hf_dir))
+    # Resolve base checkpoint
+    candidate = split_dir / f"model_{base}"
+    if not candidate.is_dir():
+        candidate = split_dir / str(base)
+    if candidate.is_dir():
+        merged = AutoencoderKL.from_pretrained(str(candidate))
     else:
         merged = AutoencoderKL.from_pretrained(str(base))
 
-    _splice_encoder_layer(merged.encoder.conv_out, lf.encoder.conv_out, hf.encoder.conv_out, split_at, latent)
-    _splice_encoder_layer(merged.quant_conv, lf.quant_conv, hf.quant_conv, split_at, latent)
-    _splice_decoder_layer(merged.post_quant_conv, lf.post_quant_conv, hf.post_quant_conv, split_at, latent)
-    _splice_decoder_layer(merged.decoder.conv_in, lf.decoder.conv_in, hf.decoder.conv_in, split_at, latent)
+    _splice_channel_aligned_layers(merged, specialists, latent)
 
     return merged
 
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
 
 def verify_merge(
     merged: AutoencoderKL,
     split_dir: str | Path,
 ) -> dict:
     """
-    Confirm that the spliced layers actually contain the expected weights.
-    Loads the two specialists again and checks per-channel equality on the
-    four spliced layers.
+    Confirm that channel-aligned layers contain weights from the correct
+    specialists, and that any uncovered channels are zero in the merged model.
+
+    Returns a dict of check_name -> bool. Raises AssertionError on failure.
     """
     split_dir = Path(split_dir)
-    lf = AutoencoderKL.from_pretrained(str(split_dir / "model_lf"))
-    hf = AutoencoderKL.from_pretrained(str(split_dir / "model_hf"))
-    lf_cfg = json.loads((split_dir / "model_lf" / "split_config.json").read_text())
-    latent = lf_cfg["latent_channels"]
-    split_at = len(lf_cfg["active_channels"])
+    latent, specialists = load_specialists(split_dir)
 
-    checks = {}
-    # Encoder side: check mean band and logvar band, both halves.
-    for layer_name, m, l, h in [
-        ("encoder.conv_out", merged.encoder.conv_out, lf.encoder.conv_out, hf.encoder.conv_out),
-        ("quant_conv",       merged.quant_conv,       lf.quant_conv,       hf.quant_conv),
-    ]:
-        checks[f"{layer_name}.mean_lf"]   = torch.equal(m.weight[:split_at],                           l.weight[:split_at])
-        checks[f"{layer_name}.mean_hf"]   = torch.equal(m.weight[split_at:latent],                     h.weight[split_at:latent])
-        checks[f"{layer_name}.logvar_lf"] = torch.equal(m.weight[latent:latent + split_at],            l.weight[latent:latent + split_at])
-        checks[f"{layer_name}.logvar_hf"] = torch.equal(m.weight[latent + split_at:2 * latent],        h.weight[latent + split_at:2 * latent])
+    checks: dict[str, bool] = {}
+    all_active: set[int] = set()
 
-    # Decoder side: check input channel halves.
-    for layer_name, m, l, h in [
-        ("post_quant_conv", merged.post_quant_conv, lf.post_quant_conv, hf.post_quant_conv),
-        ("decoder.conv_in", merged.decoder.conv_in, lf.decoder.conv_in, hf.decoder.conv_in),
-    ]:
-        checks[f"{layer_name}.in_lf"] = torch.equal(m.weight[:, :split_at],          l.weight[:, :split_at])
-        checks[f"{layer_name}.in_hf"] = torch.equal(m.weight[:, split_at:latent],    h.weight[:, split_at:latent])
+    for name, model, active in specialists:
+        idx = torch.tensor(active, dtype=torch.long)
+        enc_idx = torch.cat([idx, idx + latent])
+        all_active.update(active)
+
+        checks[f"{name}.encoder.conv_out"] = torch.equal(
+            merged.encoder.conv_out.weight[enc_idx],
+            model.encoder.conv_out.weight[enc_idx],
+        )
+        checks[f"{name}.quant_conv"] = torch.equal(
+            merged.quant_conv.weight[enc_idx],
+            model.quant_conv.weight[enc_idx],
+        )
+        checks[f"{name}.post_quant_conv"] = torch.equal(
+            merged.post_quant_conv.weight[:, idx],
+            model.post_quant_conv.weight[:, idx],
+        )
+        checks[f"{name}.decoder.conv_in"] = torch.equal(
+            merged.decoder.conv_in.weight[:, idx],
+            model.decoder.conv_in.weight[:, idx],
+        )
+
+    # Verify uncovered channels are zero in the merged model.
+    uncovered = sorted(set(range(latent)) - all_active)
+    if uncovered:
+        unc = torch.tensor(uncovered, dtype=torch.long)
+        unc_enc = torch.cat([unc, unc + latent])
+        checks["uncovered.encoder.conv_out"] = (merged.encoder.conv_out.weight[unc_enc].abs().max().item() == 0.0)
+        checks["uncovered.quant_conv"]        = (merged.quant_conv.weight[unc_enc].abs().max().item() == 0.0)
+        checks["uncovered.post_quant_conv"]   = (merged.post_quant_conv.weight[:, unc].abs().max().item() == 0.0)
+        checks["uncovered.decoder.conv_in"]   = (merged.decoder.conv_in.weight[:, unc].abs().max().item() == 0.0)
 
     failures = [k for k, v in checks.items() if not v]
     assert not failures, f"splice verification failed for: {failures}"
     return checks
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -228,7 +319,7 @@ def main() -> int:
     ap.add_argument(
         "split_dir",
         type=str,
-        help="Directory containing model_lf/ and model_hf/ produced by split_vae.py.",
+        help="Directory containing model_*/ subdirs produced by split_vae.py.",
     )
     ap.add_argument(
         "-o", "--out-dir",
@@ -240,8 +331,9 @@ def main() -> int:
         "--base",
         type=str,
         default="hf",
-        help="Source for non-spliced layers. 'lf', 'hf', or a path to another "
-             "AutoencoderKL checkpoint. Default: hf.",
+        help="Source for backbone (non-channel-aligned) weights. Postfix of a "
+             "discovered specialist (e.g. 'lf', 'hf'), full subdir name, or a "
+             "path to another AutoencoderKL checkpoint. Default: hf.",
     )
     ap.add_argument(
         "--verify",
