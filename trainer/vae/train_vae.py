@@ -100,6 +100,8 @@ def rgb_to_luma(x: torch.Tensor) -> torch.Tensor:
 def auto_scale_k(x: torch.Tensor) -> int:
     """Pick box blur kernel size based on image resolution."""
     m = min(x.shape[-2], x.shape[-1])
+    if m <= 512:
+        return 3
     if m <= 640:
         return 5
     elif m <= 1024:
@@ -207,7 +209,11 @@ def compute_loss(
 
     # FFT losses
     hf_fft_dec = hf_fft_x = None
-    if args.fft_weight > 0 or args.fft_phase_weight > 0 or args.hf_energy_weight > 0:
+    if (
+        args.fft_weight > 0 
+        or args.fft_phase_weight > 0 
+        or args.hf_energy_weight > 0 
+    ):
         k = auto_scale_k(x_hf)
         hf_fft_dec = highpass_box(dec_hf, k)
         hf_fft_x = highpass_box(x_hf, k)
@@ -260,6 +266,7 @@ def compute_loss(
         loss = loss + args.hf_energy_weight * hf_energy_loss
     if grad_energy_loss is not None:
         loss = loss + args.grad_energy_weight * grad_energy_loss
+
 
     # Hard region mining
     if miner is not None:
@@ -369,10 +376,14 @@ def main() -> None:
         vae.enable_gradient_checkpointing()
 
     vae.train()
+    print("VAE loaded with dtype:", next(vae.parameters()).dtype)
 
     lpips_fn = None
     if args.lpips_weight > 0:
-        print(f"Using LPIPS at {args.lpips_weight}" + (" (shape only)" if args.lpips_shapeonly else ""))
+        if args.lpips_rawvgg:
+            print(f"Using RAW-VGG at {args.lpips_weight}" + (" (shape only)" if args.lpips_shapeonly else ""))
+        else:
+            print(f"Using LPIPS at {args.lpips_weight}" + (" (shape only)" if args.lpips_shapeonly else ""))
         lpips_fn = lpips.LPIPS(net="vgg", lpips=(not args.lpips_rawvgg)).to(device)
         lpips_fn.eval()
         for p in lpips_fn.parameters():
