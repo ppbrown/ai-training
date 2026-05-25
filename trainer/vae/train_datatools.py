@@ -9,6 +9,9 @@ Key design:
   - load_tile_batch() loads the same images as 512x512 native-resolution tiles.
   - Tiling pipeline: resize+crop to 1024x1024, split into 4x 512x512 quadrants.
     Tile index: 0=NW, 1=NE, 2=SW, 3=SE
+
+Also has
+ write_vae_sample_webp()
 """
 
 from pathlib import Path
