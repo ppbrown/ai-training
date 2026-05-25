@@ -99,6 +99,13 @@ def parseargs():
         help="Match gradient energy (dx^2, dy^2). Helps reduce over-smoothing.",
     )
 
+    ap.add_argument(
+        "--hf_ratio", type=float, default=0.0,
+        help="If > 0, train on the high-pass component of each image instead of the full image. "
+             "Gaussian sigma = hf_ratio * min(H, W). Use the same value as freq_split.py --ratio "
+             "(e.g. 0.001) to match what you see in the split images.",
+    )
+
     ap.add_argument("--crop_mining_weight", type=float, default=0.0)
     ap.add_argument("--crop_size",          type=int,   default=128)
     ap.add_argument("--crop_patch_size",    type=int,   default=32)

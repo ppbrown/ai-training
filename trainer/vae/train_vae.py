@@ -79,6 +79,31 @@ def compute_gram_loss(vgg_slices, dec: torch.Tensor, x: torch.Tensor) -> torch.T
     return loss
 
 
+_gauss_kernel_cache: dict = {}
+
+def gaussian_highpass(x: torch.Tensor, ratio: float) -> torch.Tensor:
+    """Subtract a Gaussian-blurred version of x. Same separation as freq_split.py."""
+    B, C, H, W = x.shape
+    sigma = ratio * min(H, W)
+    if sigma < 0.3:
+        return torch.zeros_like(x)
+    key = (round(sigma, 4), C, x.device)
+    if key not in _gauss_kernel_cache:
+        radius = max(1, int(3 * sigma + 0.5))
+        size = 2 * radius + 1
+        t = torch.arange(size, dtype=torch.float32, device=x.device) - radius
+        g = torch.exp(-0.5 * (t / sigma) ** 2)
+        g = g / g.sum()
+        _gauss_kernel_cache[key] = g
+    g = _gauss_kernel_cache[key]
+    pad = g.shape[0] // 2
+    g_h = g.view(1, 1, 1, -1).expand(C, 1, 1, -1)
+    g_v = g.view(1, 1, -1, 1).expand(C, 1, -1, 1)
+    low = F.conv2d(x, g_h, padding=(0, pad), groups=C)
+    low = F.conv2d(low, g_v, padding=(pad, 0), groups=C)
+    return x - low
+
+
 def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
     """
     High-pass filter: img - blur(img) using avg_pool2d box blur.
@@ -264,9 +289,10 @@ def compute_loss(
         loss = loss + args.laplacian_weight * lap_loss
     if hf_energy_loss is not None:
         loss = loss + args.hf_energy_weight * hf_energy_loss
+    if gram_loss_val is not None:
+        loss = loss + args.gram_weight * gram_loss_val
     if grad_energy_loss is not None:
         loss = loss + args.grad_energy_weight * grad_energy_loss
-
 
     # Hard region mining
     if miner is not None:
@@ -502,6 +528,8 @@ def main() -> None:
         # Step A: whole-image pass at target resolution (e.g. 512x512)
         # ------------------------------------------------------------------
         x = x.to(device, non_blocking=True)
+        if args.hf_ratio > 0:
+            x = gaussian_highpass(x, args.hf_ratio)
 
         loss, dec, l1, lp, edge_l1, lap_loss = compute_loss(
             vae, x, args, device, lpips_fn, lap_kernel, miner, disc, step,
@@ -521,6 +549,8 @@ def main() -> None:
         # or sometimes a combination of both
         ###################################################################
         for x_extra in iter_step_batches(paths, pack, args, device):
+            if args.hf_ratio > 0:
+                x_extra = gaussian_highpass(x_extra, args.hf_ratio)
             extra_loss, extra_dec, _, _, _, _ = compute_loss(
                 vae, x_extra, args, device, lpips_fn, lap_kernel, miner, disc, step,
             )
