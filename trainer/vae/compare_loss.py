@@ -21,7 +21,7 @@ from torchvision import transforms
 #DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEVICE = "cpu"
 print("Using",DEVICE)
-PADDING = 50
+PADDING = 40
 
 to_tensor = transforms.ToTensor()  # [0,1]
 to_model  = transforms.Normalize([0.5]*3, [0.5]*3)  # [-1,1] for lpips
