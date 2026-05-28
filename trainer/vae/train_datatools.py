@@ -307,11 +307,25 @@ def write_vae_sample_webp(
 ) -> None:
     device = next(vae_model.parameters()).device
     x = load_image_tensor(sample_img, target_w, target_h)
-    x = x.unsqueeze(0).to(device)
+    x = x.unsqueeze(0).to(device, dtype=torch.float32)
+
+    was_training = vae_model.training
+    vae_model.eval()
+
+    # Temporarily disable TF32 so sample uses full fp32 precision
+    prev_matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
 
     enc = vae_model.encode(x)
     latents = enc.latent_dist.mean
     dec = vae_model.decode(latents).sample
+
+    torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
+    torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
+    if was_training:
+        vae_model.train()
 
     dec_01 = (dec[0] / 2.0 + 0.5).clamp(0.0, 1.0).detach().cpu()
     pil = tensor_to_pil_rgb(dec_01)
