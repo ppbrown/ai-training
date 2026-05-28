@@ -404,6 +404,18 @@ def main() -> None:
     vae.train()
     print("VAE loaded with dtype:", next(vae.parameters()).dtype)
 
+    if args.freeze_all_channels:
+        _CHANNEL_MODULES = [
+            vae.encoder.conv_out,
+            vae.quant_conv,
+            vae.post_quant_conv,
+            vae.decoder.conv_in,
+        ]
+        for m in _CHANNEL_MODULES:
+            for p in m.parameters():
+                p.requires_grad_(False)
+        print("Frozen channel-aligned layers: encoder.conv_out, quant_conv, post_quant_conv, decoder.conv_in")
+
     lpips_fn = None
     if args.lpips_weight > 0:
         if args.lpips_rawvgg:
@@ -484,17 +496,18 @@ def main() -> None:
             th=th,
         ))
 
+    trainable_params = [p for p in vae.parameters() if p.requires_grad]
     optimizer_name = getattr(args, "optimizer", "adamw").lower()
     if optimizer_name == "sgd":
         opt = torch.optim.SGD(
-            vae.parameters(),
+            trainable_params,
             lr=args.lr,
             momentum=getattr(args, "sgd_momentum", 0.0),
             weight_decay=args.weight_decay,
         )
     elif optimizer_name == "adamw":
         opt = torch.optim.AdamW(
-            vae.parameters(),
+            trainable_params,
             lr=args.lr,
             betas=(0.9, 0.999),
             weight_decay=args.weight_decay,

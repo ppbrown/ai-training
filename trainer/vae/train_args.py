@@ -23,6 +23,10 @@ def parseargs():
                     help="For scheduler purposes, skip this many steps."
                     " Tiled steps are not counted so factor x5 if using --hires_tiling.")
     ap.add_argument("--gradient_checkpointing", action="store_true")
+    ap.add_argument("--freeze_all_channels", action="store_true",
+                    help="Freeze channel-aligned weights (encoder.conv_out, quant_conv,"
+                         " post_quant_conv, decoder.conv_in) and train only the backbone."
+                         " Use after merging specialist channel VAEs back together.")
 
     ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
