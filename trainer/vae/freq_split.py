@@ -1,109 +1,314 @@
 #!/usr/bin/env python3
 """
-Frequency separation of images in a source tree.
+freq_split.py
 
-For each image found under SRC, writes two PNGs to DEST:
-  <stem>-lf.png  — low-frequency (blurred) component, normal image
-  <stem>-hf.png  — high-frequency residual, centered at mid-gray (128)
-                   so edges appear lighter/darker than the neutral gray background
+Frequency-band split for VAE training dataset generation.
 
-Directory structure under SRC is preserved under DEST.
+2-band mode (--out_lf / --out_hf):
+  Splits images into LF and HF using a single Gaussian blur at lf_sigma.
+    LF  = blur(lf_sigma)
+    HF  = original - blur(lf_sigma)
 
-Example:
-  freq_split.py /data/images /data/split --ratio 0.1
-  produces /data/split/00/foo-lf.png and /data/split/00/foo-hf.png
+4-band mode (--out_4split BASE_DIR):
+  Splits images into 4 bands using 3 Gaussian blurs.
+    LF  = blur(lf_sigma)          — same as 2-band LF
+    HF1 = blur(hf1_sigma) - LF   — medium-high frequencies
+    HF2 = blur(hf2_sigma) - blur(hf1_sigma)  — high frequencies
+    HF3 = original - blur(hf2_sigma)          — finest detail
+  Output directories: BASE_DIR/lf/, BASE_DIR/hf1/, BASE_DIR/hf2/, BASE_DIR/hf3/
+  Sigma order must satisfy: hf2_sigma < hf1_sigma < lf_sigma
+
+Sigma values are FIXED in pixel space for consistent band boundaries
+across the entire dataset.
+
+Usage:
+  # 2-band split
+  python freq_split.py --input /data/originals --out_lf /data/lf --out_hf /data/hf
+
+  # 4-band split
+  python freq_split.py --input /data/originals --out_4split /data/split4
+
+  # 4-band with custom sigmas
+  python freq_split.py --input /data/originals --out_4split /data/split4 \\
+      --lf_sigma 10.0 --hf1_sigma 4.0 --hf2_sigma 1.5
+
+All bands are saved as PNG, clipped to [0,1].
+
+Default sigma values (for 512x512 images):
+  lf_sigma  = 10.0 px  (broad color/luminance blobs)
+  hf1_sigma =  5.0 px  (hf1/hf2 boundary, one octave below lf)
+  hf2_sigma =  2.5 px  (hf2/hf3 boundary, one octave below hf1)
 """
 
 import argparse
-import os
+import multiprocessing as mp
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
+from tqdm import tqdm
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
-
-
-def load_float(path):
-    img = Image.open(path).convert('RGB')
-    return np.array(img, dtype=np.float32) / 255.0
-
-
-def process_image(src_path, dest_dir, ratio):
-    arr = load_float(src_path)
-    h, w = arr.shape[:2]
-    sigma = ratio * min(h, w)
-
-    low = gaussian_filter(arr, sigma=[sigma, sigma, 0])
-    high = arr - low
-
-    lf_uint8 = (np.clip(low, 0, 1) * 255).astype(np.uint8)
-    # Center HF at 0.5 (mid-gray=128): negative diffs go dark, positive go bright
-    hf_uint8 = (np.clip(high + 0.5, 0, 1) * 255).astype(np.uint8)
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    stem = src_path.stem
-    Image.fromarray(lf_uint8).save(dest_dir / f'{stem}-lf.png')
-    Image.fromarray(hf_uint8).save(dest_dir / f'{stem}-hf.png')
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+DEFAULT_LF_SIGMA  = 10.0
+DEFAULT_HF1_SIGMA =  8.0   # octave below lf_sigma
+DEFAULT_HF2_SIGMA =  2   # octave below hf1_sigma
+DEFAULT_ANALYZE_SIGMA     =  1.0
+DEFAULT_ANALYZE_THRESHOLD =  0.02
+EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
 
 
-def iter_images(root):
-    for p in Path(root).rglob('*'):
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
-            yield p
+# ---------------------------------------------------------------------------
+# Core split logic
+# ---------------------------------------------------------------------------
+
+def _gblur(arr: np.ndarray, sigma: float) -> np.ndarray:
+    return np.stack([
+        gaussian_filter(arr[:, :, c], sigma=sigma)
+        for c in range(3)
+    ], axis=2)
 
 
-def main():
+def split_image(img_path: Path, lf_sigma: float) -> dict[str, np.ndarray]:
+    """2-band split: returns {'lf', 'hf'}."""
+    img = Image.open(img_path).convert("RGB")
+    arr = np.array(img, dtype=np.float32) / 255.0
+    lf = _gblur(arr, lf_sigma)
+    return {"lf": lf, "hf": arr - lf}
+
+
+def split_image_4(
+    img_path: Path,
+    lf_sigma: float,
+    hf1_sigma: float,
+    hf2_sigma: float,
+) -> dict[str, np.ndarray]:
+    """4-band split: returns {'lf', 'hf1', 'hf2', 'hf3'}."""
+    img = Image.open(img_path).convert("RGB")
+    arr = np.array(img, dtype=np.float32) / 255.0
+    lf   = _gblur(arr, lf_sigma)
+    mid1 = _gblur(arr, hf1_sigma)
+    mid2 = _gblur(arr, hf2_sigma)
+    return {
+        "lf":  lf,
+        "hf1": mid1 - lf,
+        "hf2": mid2 - mid1,
+        "hf3": arr  - mid2,
+    }
+
+
+def save_band(arr: np.ndarray, out_path: Path) -> None:
+    clipped = np.clip(arr, 0.0, 1.0)
+    img = Image.fromarray((clipped * 255).astype(np.uint8))
+    #img.save(out_path.with_suffix(".png"), compress_level=9)
+    img.save(out_path.with_suffix(".png"))
+
+
+def measure_sharpness(img_path: Path, sigma: float) -> float:
+    """RMS of the HF component at `sigma`. Higher = sharper."""
+    img = Image.open(img_path).convert("RGB")
+    arr = np.array(img, dtype=np.float32) / 255.0
+    hf = arr - _gblur(arr, sigma)
+    return float(np.sqrt(np.mean(hf ** 2)))
+
+
+def _analyze_worker(args: tuple) -> tuple[str, float]:
+    img_path, sigma = args
+    try:
+        return (str(img_path), measure_sharpness(img_path, sigma))
+    except Exception:
+        return (str(img_path), -1.0)
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+def _worker(args: tuple) -> str | None:
+    """Process a single image. Returns error string or None on success."""
+    img_path, out_dirs, lf_sigma, input_root, hf1_sigma, hf2_sigma = args
+    try:
+        rel = img_path.relative_to(input_root)
+        out_paths = {band: out_dirs[band] / rel.with_suffix(".png") for band in out_dirs}
+        if all(p.exists() for p in out_paths.values()):
+            return None
+        if hf1_sigma is not None:
+            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma)
+        else:
+            bands_data = split_image(img_path, lf_sigma)
+        for band, arr in bands_data.items():
+            out_path = out_paths[band]
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            save_band(arr, out_path)
+        return None
+    except Exception as e:
+        return f"{img_path}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Split images into absolute frequency bands for VAE training."
     )
-    parser.add_argument('src', help='Source directory tree')
-    parser.add_argument('dest', help='Destination directory for output pairs')
-    parser.add_argument(
-        '--ratio', type=float, default=0.001,
-        help='Gaussian sigma as fraction of shorter image dimension (default: 0.1)',
-    )
+    parser.add_argument("--input", "-i", required=True, type=Path,
+                        help="Directory of source images")
+
+    # 2-band mode
+    parser.add_argument("--out_lf", type=Path,
+                        help="(2-band) Output root for LF images")
+    parser.add_argument("--out_hf", type=Path,
+                        help="(2-band) Output root for HF images")
+
+    # 4-band mode
+    parser.add_argument("--out_4split", type=Path,
+                        help="(4-band) Base output directory; creates lf/, hf1/, hf2/, hf3/ subdirs")
+
+    # Sigma controls
+    parser.add_argument("--lf_sigma", type=float, default=DEFAULT_LF_SIGMA,
+                        help=f"Gaussian sigma for LF band in pixels (default: {DEFAULT_LF_SIGMA})")
+    parser.add_argument("--hf1_sigma", type=float, default=DEFAULT_HF1_SIGMA,
+                        help=f"(4-band) Sigma for HF1/HF2 boundary (default: {DEFAULT_HF1_SIGMA})")
+    parser.add_argument("--hf2_sigma", type=float, default=DEFAULT_HF2_SIGMA,
+                        help=f"(4-band) Sigma for HF2/HF3 boundary (default: {DEFAULT_HF2_SIGMA})")
+
+    parser.add_argument("--workers", type=int, default=mp.cpu_count(),
+                        help="Parallel worker count (default: cpu count)")
+    parser.add_argument("--preview", action="store_true",
+                        help="Process first 5 images only, for visual inspection")
+    parser.add_argument("--analyze", action="store_true",
+                        help="Report soft/blurry images without writing any files")
+    parser.add_argument("--analyze_sigma", type=float, default=DEFAULT_ANALYZE_SIGMA,
+                        help=f"HF sigma for sharpness measurement in pixels (default: {DEFAULT_ANALYZE_SIGMA})")
+    parser.add_argument("--analyze_threshold", type=float, default=DEFAULT_ANALYZE_THRESHOLD,
+                        help=f"Minimum RMS sharpness score to pass (default: {DEFAULT_ANALYZE_THRESHOLD})")
     args = parser.parse_args()
 
-    src = Path(args.src).resolve()
-    dest = Path(args.dest).resolve()
-
-    if not src.is_dir():
-        print(f'Error: {args.src!r} is not a directory', file=sys.stderr)
+    # Validate input
+    if not args.input.is_dir():
+        print(f"ERROR: input directory not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    jobs = []
-    for img_path in iter_images(src):
-        rel = img_path.parent.relative_to(src)
-        jobs.append((img_path, dest / rel))
-
-    if not jobs:
-        print('No images found.')
+    # Determine mode and build out_dirs
+    if args.analyze:
+        hf1_sigma = None
+        hf2_sigma = None
+        out_dirs = {}
+    elif args.out_4split:
+        if args.hf2_sigma >= args.hf1_sigma or args.hf1_sigma >= args.lf_sigma:
+            print(
+                f"ERROR: sigmas must satisfy hf2_sigma < hf1_sigma < lf_sigma "
+                f"(got {args.hf2_sigma} < {args.hf1_sigma} < {args.lf_sigma}?)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        hf1_sigma = args.hf1_sigma
+        hf2_sigma = args.hf2_sigma
+        out_dirs = {
+            "lf":  args.out_4split / "lf",
+            "hf1": args.out_4split / "hf1",
+            "hf2": args.out_4split / "hf2",
+            "hf3": args.out_4split / "hf3",
+        }
+    elif args.out_lf or args.out_hf:
+        hf1_sigma = None
+        hf2_sigma = None
+        out_dirs = {}
+        if args.out_lf:
+            out_dirs["lf"] = args.out_lf
+        if args.out_hf:
+            out_dirs["hf"] = args.out_hf
+    else:
+        print(
+            "ERROR: specify either --out_4split BASE_DIR  or at least one of --out_lf / --out_hf",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    total = len(jobs)
-    done = 0
-    errors = 0
+    # Collect images
+    images = sorted([
+        p for p in args.input.rglob("*")
+        if p.is_file() and p.suffix.lower() in EXTENSIONS
+    ])
+    if not images:
+        print(f"ERROR: no images found in {args.input}", file=sys.stderr)
+        sys.exit(1)
 
-    workers = os.cpu_count() or 1
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(process_image, p, d, args.ratio): p for p, d in jobs}
-        for fut in as_completed(futures):
-            img_path = futures[fut]
-            try:
-                fut.result()
-                done += 1
-                print(f'\r{done}/{total}', end='', flush=True)
-            except Exception as exc:
-                print(f'\nWARN: {img_path}: {exc}', file=sys.stderr)
-                errors += 1
+    if args.preview:
+        images = images[:5]
+        print(f"Preview mode: processing {len(images)} images")
 
-    print(f'\nDone. {done} written, {errors} errors.')
+    # Print config — all to stderr in analyze mode so stdout stays pipeline-clean
+    info = sys.stderr if args.analyze else sys.stdout
+    print(f"Input:     {args.input}  ({len(images)} images)", file=info)
+    if args.analyze:
+        print(f"Mode:      analyze  (no files written)", file=info)
+        print(f"sigma:     {args.analyze_sigma} px", file=info)
+        print(f"threshold: {args.analyze_threshold}", file=info)
+    elif args.out_4split:
+        print(f"Out base:  {args.out_4split}  (lf/, hf1/, hf2/, hf3/)")
+        print(f"lf_sigma:  {args.lf_sigma} px")
+        print(f"hf1_sigma: {args.hf1_sigma} px")
+        print(f"hf2_sigma: {args.hf2_sigma} px")
+    else:
+        if args.out_lf:
+            print(f"Out LF:    {args.out_lf}")
+        if args.out_hf:
+            print(f"Out HF:    {args.out_hf}")
+        print(f"lf_sigma:  {args.lf_sigma} px")
+    print(f"Workers:   {args.workers}", file=info)
+    print(file=info)
+
+    if args.analyze:
+        awork = [(p, args.analyze_sigma) for p in images]
+        soft: list[tuple[str, float]] = []
+        read_errors: list[str] = []
+        with mp.Pool(args.workers) as pool:
+            for path, score in tqdm(
+                pool.imap_unordered(_analyze_worker, awork), total=len(awork)
+            ):
+                if score < 0:
+                    read_errors.append(path)
+                elif score < args.analyze_threshold:
+                    soft.append((path, score))
+        if read_errors:
+            print(f"{len(read_errors)} file(s) could not be read:", file=sys.stderr)
+            for p in sorted(read_errors):
+                print(f"  {p}", file=sys.stderr)
+        for path, score in sorted(soft):
+            print(path)
+        print(
+            f"{len(soft)}/{len(images)} failed "
+            f"(sigma={args.analyze_sigma}, threshold={args.analyze_threshold})",
+            file=sys.stderr,
+        )
+        return
+
+    work = [
+        (p, out_dirs, args.lf_sigma, args.input, hf1_sigma, hf2_sigma)
+        for p in images
+    ]
+
+    errors = []
+    with mp.Pool(args.workers) as pool:
+        for err in tqdm(pool.imap_unordered(_worker, work), total=len(work)):
+            if err:
+                errors.append(err)
+
+    if errors:
+        print(f"\n{len(errors)} errors:")
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        sys.exit(1)
+    else:
+        bands = list(out_dirs.keys())
+        print(f"\nDone. {len(images)} images -> bands: {', '.join(bands)}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
