@@ -140,6 +140,8 @@ def _worker(args: tuple) -> str | None:
         else:
             bands_data = split_image(img_path, lf_sigma)
         for band, arr in bands_data.items():
+            if band not in out_paths:
+                continue
             out_path = out_paths[band]
             out_path.parent.mkdir(parents=True, exist_ok=True)
             save_band(arr, out_path)
