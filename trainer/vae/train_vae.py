@@ -152,6 +152,67 @@ def fft_phase_loss(dec_hf: torch.Tensor, x_hf: torch.Tensor, eps: float = 1e-8) 
 
 
 # -----------------------------
+# Channel freezing
+# -----------------------------
+
+def _parse_channel_range(s: str) -> list:
+    """Parse 'START-END' (inclusive) into a list of ints."""
+    parts = s.split("-")
+    if len(parts) != 2:
+        raise SystemExit(f"--freeze_channels: expected 'START-END', got '{s}'")
+    start, end = int(parts[0]), int(parts[1])
+    if start > end:
+        raise SystemExit(f"--freeze_channels: start {start} > end {end}")
+    return list(range(start, end + 1))
+
+
+def _register_channel_freeze_hooks(vae, channels: list) -> list:
+    """
+    Zero gradients for the given latent channel indices in the four
+    channel-aligned layers. Returns hook handles (keep alive for training).
+
+    Encoder-side (encoder.conv_out, quant_conv): weight output rows
+      [c] (mean band) and [c + latent] (logvar band), plus bias entries.
+    Decoder-side (post_quant_conv, decoder.conv_in): weight input columns [c].
+    """
+    latent = vae.config.latent_channels
+    handles = []
+    ch = sorted(channels)
+    enc_rows = ch + [c + latent for c in ch]
+
+    def enc_weight_hook(rows):
+        def hook(grad):
+            g = grad.clone()
+            g[rows] = 0.0
+            return g
+        return hook
+
+    def enc_bias_hook(rows):
+        def hook(grad):
+            g = grad.clone()
+            g[rows] = 0.0
+            return g
+        return hook
+
+    def dec_col_hook(cols):
+        def hook(grad):
+            g = grad.clone()
+            g[:, cols] = 0.0
+            return g
+        return hook
+
+    for mod in (vae.encoder.conv_out, vae.quant_conv):
+        handles.append(mod.weight.register_hook(enc_weight_hook(enc_rows)))
+        if mod.bias is not None:
+            handles.append(mod.bias.register_hook(enc_bias_hook(enc_rows)))
+
+    for mod in (vae.post_quant_conv, vae.decoder.conv_in):
+        handles.append(mod.weight.register_hook(dec_col_hook(ch)))
+
+    return handles
+
+
+# -----------------------------
 # Loader bookkeeping
 # -----------------------------
 
@@ -404,17 +465,33 @@ def main() -> None:
     vae.train()
     print("VAE loaded with dtype:", next(vae.parameters()).dtype)
 
+    if args.freeze_all_channels and (args.freeze_channels or args.freeze_backbone):
+        raise SystemExit("--freeze_all_channels is mutually exclusive with --freeze_backbone and --freeze_channels")
+
+    _CHANNEL_MODULES = [
+        vae.encoder.conv_out,
+        vae.quant_conv,
+        vae.post_quant_conv,
+        vae.decoder.conv_in,
+    ]
+
+    _channel_freeze_handles = []
     if args.freeze_all_channels:
-        _CHANNEL_MODULES = [
-            vae.encoder.conv_out,
-            vae.quant_conv,
-            vae.post_quant_conv,
-            vae.decoder.conv_in,
-        ]
         for m in _CHANNEL_MODULES:
             for p in m.parameters():
                 p.requires_grad_(False)
         print("Frozen channel-aligned layers: encoder.conv_out, quant_conv, post_quant_conv, decoder.conv_in")
+    else:
+        if args.freeze_backbone:
+            channel_param_ids = {id(p) for m in _CHANNEL_MODULES for p in m.parameters()}
+            for p in vae.parameters():
+                if id(p) not in channel_param_ids:
+                    p.requires_grad_(False)
+            print("Frozen backbone; training only channel-aligned layers")
+        if args.freeze_channels:
+            ch = _parse_channel_range(args.freeze_channels)
+            _channel_freeze_handles = _register_channel_freeze_hooks(vae, ch)
+            print(f"Freezing channels {ch[0]}-{ch[-1]} via gradient hooks")
 
     lpips_fn = None
     if args.lpips_weight > 0:
@@ -524,6 +601,8 @@ def main() -> None:
     last_log_t = time.perf_counter()
     last_log_step = 0
     step = 0
+    if args.skip_steps > 0:
+        print("Skipping", args.skip_steps, "steps...")
 
     while step < args.train_steps:
         pack = random.choice(packs)

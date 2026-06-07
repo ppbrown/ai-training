@@ -26,7 +26,17 @@ def parseargs():
     ap.add_argument("--freeze_all_channels", action="store_true",
                     help="Freeze channel-aligned weights (encoder.conv_out, quant_conv,"
                          " post_quant_conv, decoder.conv_in) and train only the backbone."
-                         " Use after merging specialist channel VAEs back together.")
+                         " Use after merging specialist channel VAEs back together."
+                         " Mutually exclusive with --freeze_backbone and --freeze_channels.")
+    ap.add_argument("--freeze_backbone", action="store_true",
+                    help="Freeze all backbone weights and train only the channel-aligned layers"
+                         " (encoder.conv_out, quant_conv, post_quant_conv, decoder.conv_in).")
+    ap.add_argument("--freeze_channels", type=str, default=None,
+                    help="Freeze channel-aligned weights for a specific range of latent channels."
+                         " Format: START-END (inclusive), e.g. '0-7'."
+                         " Zeros gradients for those channel rows/cols in encoder.conv_out,"
+                         " quant_conv, post_quant_conv, decoder.conv_in."
+                         " Cannot be combined with --freeze_all_channels.")
 
     ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
