@@ -83,12 +83,23 @@ def _resize_shortest_side(img: Image.Image, target: int = 1024) -> Image.Image:
     return img.resize(new_size, Image.LANCZOS)
 
 
-def split_image(img_path: Path, lf_sigma: float, resize_target: int | None = None) -> dict[str, np.ndarray]:
+def _resize_arr(arr: np.ndarray, target: int) -> np.ndarray:
+    """Downscale float32 HxWx3 array so shortest side equals target. Preserves negative values."""
+    h, w = arr.shape[:2]
+    short = min(h, w)
+    if short <= target:
+        return arr
+    scale = target / short
+    new_w, new_h = round(w * scale), round(h * scale)
+    return np.stack([
+        np.array(Image.fromarray(arr[:, :, c]).resize((new_w, new_h), Image.LANCZOS))
+        for c in range(3)
+    ], axis=2)
+
+
+def split_image(img_path: Path, lf_sigma: float) -> dict[str, np.ndarray]:
     """2-band split: returns {'lf', 'hf'}."""
-    img = Image.open(img_path).convert("RGB")
-    if resize_target:
-        img = _resize_shortest_side(img, resize_target)
-    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
     lf = _gblur(arr, lf_sigma)
     return {"lf": lf, "hf": arr - lf}
 
@@ -98,13 +109,9 @@ def split_image_4(
     lf_sigma: float,
     hf1_sigma: float,
     hf2_sigma: float,
-    resize_target: int | None = None,
 ) -> dict[str, np.ndarray]:
     """4-band split: returns {'lf', 'hf1', 'hf2', 'hf3'}."""
-    img = Image.open(img_path).convert("RGB")
-    if resize_target:
-        img = _resize_shortest_side(img, resize_target)
-    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
     lf   = _gblur(arr, lf_sigma)
     mid1 = _gblur(arr, hf1_sigma)
     mid2 = _gblur(arr, hf2_sigma)
@@ -127,18 +134,15 @@ def save_band(arr: np.ndarray, out_path: Path) -> None:
 
 def measure_sharpness(img_path: Path, sigma: float, resize_target: int | None = None) -> float:
     """RMS of the HF component at `sigma`. Higher = sharper."""
-    img = Image.open(img_path).convert("RGB")
-    if resize_target:
-        img = _resize_shortest_side(img, resize_target)
-    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
     hf = arr - _gblur(arr, sigma)
     return float(np.sqrt(np.mean(hf ** 2)))
 
 
 def _analyze_worker(args: tuple) -> tuple[str, float]:
-    img_path, sigma, resize_target = args
+    img_path, sigma = args
     try:
-        return (str(img_path), measure_sharpness(img_path, sigma, resize_target))
+        return (str(img_path), measure_sharpness(img_path, sigma))
     except Exception:
         return (str(img_path), -1.0)
 
@@ -156,15 +160,20 @@ def _worker(args: tuple) -> str | None:
         if all(p.exists() for p in out_paths.values()):
             return None
         if hf1_sigma is not None:
-            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma, resize_target)
+            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma)
         else:
-            bands_data = split_image(img_path, lf_sigma, resize_target)
+            bands_data = split_image(img_path, lf_sigma)
         for band, arr in bands_data.items():
             if band not in out_paths:
                 continue
             out_path = out_paths[band]
             out_path.parent.mkdir(parents=True, exist_ok=True)
             save_band(arr, out_path)
+            if resize_target:
+                clipped_img = Image.fromarray((np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8))
+                scaled_img = _resize_shortest_side(clipped_img, resize_target)
+                scaled_path = out_path.parent / (out_path.stem + f".{resize_target}.webp")
+                scaled_img.save(scaled_path, lossless=True)
         return None
     except Exception as e:
         return f"{img_path}: {e}"
@@ -293,7 +302,7 @@ def main() -> None:
     print(file=info)
 
     if args.analyze:
-        awork = [(p, args.analyze_sigma, args.resize_target) for p in images]
+        awork = [(p, args.analyze_sigma) for p in images]
         soft: list[tuple[str, float]] = []
         read_errors: list[str] = []
         with mp.Pool(args.workers) as pool:
