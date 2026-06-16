@@ -80,7 +80,7 @@ def _resize_shortest_side(img: Image.Image, target: int = 1024) -> Image.Image:
         return img
     scale = target / short_side
     new_size = (round(w * scale), round(h * scale))
-    return img.resize(new_size, Image.LANCZOS)
+    return img.resize(new_size, Image.BICUBIC)
 
 
 def _resize_arr(arr: np.ndarray, target: int) -> np.ndarray:
@@ -92,7 +92,7 @@ def _resize_arr(arr: np.ndarray, target: int) -> np.ndarray:
     scale = target / short
     new_w, new_h = round(w * scale), round(h * scale)
     return np.stack([
-        np.array(Image.fromarray(arr[:, :, c]).resize((new_w, new_h), Image.LANCZOS))
+        np.array(Image.fromarray(arr[:, :, c]).resize((new_w, new_h), Image.BICUBIC))
         for c in range(3)
     ], axis=2)
 
@@ -168,12 +168,17 @@ def _worker(args: tuple) -> str | None:
                 continue
             out_path = out_paths[band]
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            save_band(arr, out_path)
             if resize_target:
                 clipped_img = Image.fromarray((np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8))
-                scaled_img = _resize_shortest_side(clipped_img, resize_target)
-                scaled_path = out_path.parent / (out_path.stem + f".{resize_target}.webp")
-                scaled_img.save(scaled_path, lossless=True)
+                w, h = clipped_img.size
+                short = min(w, h)
+                if short > resize_target:
+                    scale = resize_target / short
+                    new_size = (round(w * scale), round(h * scale))
+                    clipped_img = clipped_img.resize(new_size, Image.BICUBIC)
+                clipped_img.save(out_path.with_suffix(".webp"), lossless=True)
+            else:
+                save_band(arr, out_path)
         return None
     except Exception as e:
         return f"{img_path}: {e}"
