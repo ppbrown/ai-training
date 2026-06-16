@@ -592,6 +592,13 @@ def main() -> None:
     else:
         raise SystemExit(f"Unsupported optimizer: {optimizer_name}")
 
+    scheduler = None
+    if args.warmup_steps > 0:
+        def _warmup_lr(step_idx: int) -> float:
+            return min(1.0, (step_idx + 1) / args.warmup_steps)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_warmup_lr)
+        print(f"LR warmup enabled: {args.warmup_steps} steps")
+
     _, sample_tw, sample_th = parse_dataset_spec(args.dataset[0])
     sample_img_path = Path(args.sample_img) if args.sample_img else None
 
@@ -630,6 +637,8 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        if scheduler is not None:
+            scheduler.step()
 
         if disc is not None:
             disc_update(disc, opt_d, x, dec, args, step)
@@ -649,6 +658,8 @@ def main() -> None:
             opt.zero_grad(set_to_none=True)
             extra_loss.backward()
             opt.step()
+            if scheduler is not None:
+                scheduler.step()
             if disc is not None:
                 disc_update(disc, opt_d, x_extra, extra_dec, args, step)
             step += 1

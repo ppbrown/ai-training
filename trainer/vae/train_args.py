@@ -51,6 +51,8 @@ def parseargs():
 
     ap.add_argument("--batch_size", type=int, default=1, help="Batch size per step (per dataset, per GPU).")
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    ap.add_argument("--warmup_steps", type=int, default=0,
+                    help="Linearly warm up LR from 0 to --lr over this many optimizer steps. 0 disables warmup.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
     ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
