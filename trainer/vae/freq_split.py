@@ -11,10 +11,10 @@ Frequency-band split for VAE training dataset generation.
 
 4-band mode (--out_4split BASE_DIR):
   Splits images into 4 bands using 3 Gaussian blurs.
-    LF  = blur(lf_sigma)          — same as 2-band LF
-    HF1 = blur(hf1_sigma) - LF   — medium-high frequencies
-    HF2 = blur(hf2_sigma) - blur(hf1_sigma)  — high frequencies
-    HF3 = original - blur(hf2_sigma)          — finest detail
+    LF  = blur(lf_sigma)          - same as 2-band LF
+    HF1 = blur(hf1_sigma) - LF   - medium-high frequencies
+    HF2 = blur(hf2_sigma) - blur(hf1_sigma)  - high frequencies
+    HF3 = original - blur(hf2_sigma)          - finest detail
   Output directories: BASE_DIR/lf/, BASE_DIR/hf1/, BASE_DIR/hf2/, BASE_DIR/hf3/
   Sigma order must satisfy: hf2_sigma < hf1_sigma < lf_sigma
 
@@ -40,7 +40,7 @@ Default sigma values (for 512x512 images):
   hf2_sigma =  2.5 px  (hf2/hf3 boundary, one octave below hf1)
 """
 
-import argparse
+import jsonargparse as argparse
 import multiprocessing as mp
 import sys
 from pathlib import Path
@@ -72,9 +72,22 @@ def _gblur(arr: np.ndarray, sigma: float) -> np.ndarray:
     ], axis=2)
 
 
-def split_image(img_path: Path, lf_sigma: float) -> dict[str, np.ndarray]:
+def _resize_shortest_side(img: Image.Image, target: int = 1024) -> Image.Image:
+    """Downscale (never upscale) so the shortest side equals `target`, preserving aspect ratio."""
+    w, h = img.size
+    short_side = min(w, h)
+    if short_side <= target:
+        return img
+    scale = target / short_side
+    new_size = (round(w * scale), round(h * scale))
+    return img.resize(new_size, Image.LANCZOS)
+
+
+def split_image(img_path: Path, lf_sigma: float, resize_target: int | None = None) -> dict[str, np.ndarray]:
     """2-band split: returns {'lf', 'hf'}."""
     img = Image.open(img_path).convert("RGB")
+    if resize_target:
+        img = _resize_shortest_side(img, resize_target)
     arr = np.array(img, dtype=np.float32) / 255.0
     lf = _gblur(arr, lf_sigma)
     return {"lf": lf, "hf": arr - lf}
@@ -85,9 +98,12 @@ def split_image_4(
     lf_sigma: float,
     hf1_sigma: float,
     hf2_sigma: float,
+    resize_target: int | None = None,
 ) -> dict[str, np.ndarray]:
     """4-band split: returns {'lf', 'hf1', 'hf2', 'hf3'}."""
     img = Image.open(img_path).convert("RGB")
+    if resize_target:
+        img = _resize_shortest_side(img, resize_target)
     arr = np.array(img, dtype=np.float32) / 255.0
     lf   = _gblur(arr, lf_sigma)
     mid1 = _gblur(arr, hf1_sigma)
@@ -104,21 +120,25 @@ def save_band(arr: np.ndarray, out_path: Path) -> None:
     clipped = np.clip(arr, 0.0, 1.0)
     img = Image.fromarray((clipped * 255).astype(np.uint8))
     #img.save(out_path.with_suffix(".png"), compress_level=9)
-    img.save(out_path.with_suffix(".png"))
+    #img.save(out_path.with_suffix(args.suffix))
+    #img.save(out_path.with_suffix(".jpg", quality=95, subsampling=0))
+    img.save(out_path.with_suffix(".webp"), lossless=True)
 
 
-def measure_sharpness(img_path: Path, sigma: float) -> float:
+def measure_sharpness(img_path: Path, sigma: float, resize_target: int | None = None) -> float:
     """RMS of the HF component at `sigma`. Higher = sharper."""
     img = Image.open(img_path).convert("RGB")
+    if resize_target:
+        img = _resize_shortest_side(img, resize_target)
     arr = np.array(img, dtype=np.float32) / 255.0
     hf = arr - _gblur(arr, sigma)
     return float(np.sqrt(np.mean(hf ** 2)))
 
 
 def _analyze_worker(args: tuple) -> tuple[str, float]:
-    img_path, sigma = args
+    img_path, sigma, resize_target = args
     try:
-        return (str(img_path), measure_sharpness(img_path, sigma))
+        return (str(img_path), measure_sharpness(img_path, sigma, resize_target))
     except Exception:
         return (str(img_path), -1.0)
 
@@ -129,16 +149,16 @@ def _analyze_worker(args: tuple) -> tuple[str, float]:
 
 def _worker(args: tuple) -> str | None:
     """Process a single image. Returns error string or None on success."""
-    img_path, out_dirs, lf_sigma, input_root, hf1_sigma, hf2_sigma = args
+    img_path, out_dirs, lf_sigma, input_root, hf1_sigma, hf2_sigma, resize_target = args
     try:
         rel = img_path.relative_to(input_root)
         out_paths = {band: out_dirs[band] / rel.with_suffix(".png") for band in out_dirs}
         if all(p.exists() for p in out_paths.values()):
             return None
         if hf1_sigma is not None:
-            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma)
+            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma, resize_target)
         else:
-            bands_data = split_image(img_path, lf_sigma)
+            bands_data = split_image(img_path, lf_sigma, resize_target)
         for band, arr in bands_data.items():
             if band not in out_paths:
                 continue
@@ -160,6 +180,12 @@ def main() -> None:
     )
     parser.add_argument("--input", "-i", required=True, type=Path,
                         help="Directory of source images")
+    parser.add_argument("--suffix", default=".png")
+    resize_group = parser.add_mutually_exclusive_group()
+    resize_group.add_argument("--1024", dest="resize_target", action="store_const", const=1024,
+                              help="Downscale so shortest side is 1024px before splitting (never upscales)")
+    resize_group.add_argument("--512", dest="resize_target", action="store_const", const=512,
+                              help="Downscale so shortest side is 512px before splitting (never upscales)")
 
     # 2-band mode
     parser.add_argument("--out_lf", type=Path,
@@ -267,7 +293,7 @@ def main() -> None:
     print(file=info)
 
     if args.analyze:
-        awork = [(p, args.analyze_sigma) for p in images]
+        awork = [(p, args.analyze_sigma, args.resize_target) for p in images]
         soft: list[tuple[str, float]] = []
         read_errors: list[str] = []
         with mp.Pool(args.workers) as pool:
@@ -292,7 +318,7 @@ def main() -> None:
         return
 
     work = [
-        (p, out_dirs, args.lf_sigma, args.input, hf1_sigma, hf2_sigma)
+        (p, out_dirs, args.lf_sigma, args.input, hf1_sigma, hf2_sigma, args.resize_target)
         for p in images
     ]
 
