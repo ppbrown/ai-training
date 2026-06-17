@@ -217,7 +217,7 @@ def main() -> None:
     parser.add_argument("--hf1_sigma", type=float, default=DEFAULT_HF1_SIGMA,
                         help=f"(4-band) Sigma for HF1/HF2 boundary (default: {DEFAULT_HF1_SIGMA})")
     parser.add_argument("--hf2_sigma", type=float, default=DEFAULT_HF2_SIGMA,
-                        help=f"(4-band) Sigma for HF2/HF3 boundary (default: {DEFAULT_HF2_SIGMA})")
+                        help=f"(4-band) Sigma for HF2/HF3 boundary (default: {DEFAULT_HF2_SIGMA}. best is probably 1.5)")
 
     parser.add_argument("--workers", type=int, default=mp.cpu_count(),
                         help="Parallel worker count (default: cpu count)")
