@@ -116,10 +116,16 @@ def parseargs():
     )
 
     ap.add_argument(
-        "--hf_ratio", type=float, default=0.0,
-        help="If > 0, train on the high-pass component of each image instead of the full image. "
-             "Gaussian sigma = hf_ratio * min(H, W). Use the same value as freq_split.py --ratio "
-             "(e.g. 0.001) to match what you see in the split images.",
+        "--freq_lowbound", type=float, default=0.0,
+        help="Fixed Gaussian sigma for the fine (high-freq) edge of the training band. "
+             "Content finer than this sigma is excluded. 0 = no lower bound (include all fine detail). "
+             "Typical range: 0.5-5.0 px. Use with --freq_highbound to isolate a mid band.",
+    )
+    ap.add_argument(
+        "--freq_highbound", type=float, default=0.0,
+        help="Fixed Gaussian sigma for the coarse (low-freq) edge of the training band. "
+             "Content coarser than this sigma is excluded. 0 = no upper bound (include all coarse content). "
+             "Typical range: 2.0-20.0 px. Must be > --freq_lowbound if both are set.",
     )
 
     ap.add_argument("--crop_mining_weight", type=float, default=0.0)

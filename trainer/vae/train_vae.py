@@ -81,12 +81,9 @@ def compute_gram_loss(vgg_slices, dec: torch.Tensor, x: torch.Tensor) -> torch.T
 
 _gauss_kernel_cache: dict = {}
 
-def gaussian_highpass(x: torch.Tensor, ratio: float) -> torch.Tensor:
-    """Subtract a Gaussian-blurred version of x. Same separation as freq_split.py."""
+def _gblur_torch(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable Gaussian blur with fixed pixel-space sigma."""
     B, C, H, W = x.shape
-    sigma = ratio * min(H, W)
-    if sigma < 0.3:
-        return torch.zeros_like(x)
     key = (round(sigma, 4), C, x.device)
     if key not in _gauss_kernel_cache:
         radius = max(1, int(3 * sigma + 0.5))
@@ -99,9 +96,19 @@ def gaussian_highpass(x: torch.Tensor, ratio: float) -> torch.Tensor:
     pad = g.shape[0] // 2
     g_h = g.view(1, 1, 1, -1).expand(C, 1, 1, -1)
     g_v = g.view(1, 1, -1, 1).expand(C, 1, -1, 1)
-    low = F.conv2d(x, g_h, padding=(0, pad), groups=C)
-    low = F.conv2d(low, g_v, padding=(pad, 0), groups=C)
-    return x - low
+    out = F.conv2d(x, g_h, padding=(0, pad), groups=C)
+    return F.conv2d(out, g_v, padding=(pad, 0), groups=C)
+
+
+def apply_freq_band(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Extract the frequency band between sigma lo (fine edge) and hi (coarse edge).
+    lo=0: no highpass (include all fine detail).
+    hi=0: no lowpass (include all coarse content).
+    Both 0: returns x unchanged.
+    """
+    upper = _gblur_torch(x, hi) if hi > 0.0 else x
+    lower = _gblur_torch(x, lo) if lo > 0.0 else torch.zeros_like(x)
+    return upper - lower
 
 
 def highpass_box(img: torch.Tensor, k: int) -> torch.Tensor:
@@ -259,6 +266,12 @@ def compute_loss(
     posterior = enc.latent_dist
     latents = posterior.mean
     dec = vae.decode(latents).sample
+
+    lo = args.freq_lowbound
+    hi = args.freq_highbound
+    if lo > 0.0 or hi > 0.0:
+        x   = apply_freq_band(x,   lo, hi)
+        dec = apply_freq_band(dec, lo, hi)
 
     l1 = F.l1_loss(dec, x)
 
@@ -627,8 +640,6 @@ def main() -> None:
         # Step A: whole-image pass at target resolution (e.g. 512x512)
         # ------------------------------------------------------------------
         x = x.to(device, non_blocking=True)
-        if args.hf_ratio > 0:
-            x = gaussian_highpass(x, args.hf_ratio)
 
         loss, dec, l1, lp, edge_l1, lap_loss = compute_loss(
             vae, x, args, device, lpips_fn, lap_kernel, miner, disc, step,
@@ -650,8 +661,6 @@ def main() -> None:
         # or sometimes a combination of both
         ###################################################################
         for x_extra in iter_step_batches(paths, pack, args, device):
-            if args.hf_ratio > 0:
-                x_extra = gaussian_highpass(x_extra, args.hf_ratio)
             extra_loss, extra_dec, _, _, _, _ = compute_loss(
                 vae, x_extra, args, device, lpips_fn, lap_kernel, miner, disc, step,
             )
