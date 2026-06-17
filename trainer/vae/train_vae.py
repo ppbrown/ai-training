@@ -102,8 +102,8 @@ def _gblur_torch(x: torch.Tensor, sigma: float) -> torch.Tensor:
 
 def apply_freq_band(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
     """Extract the frequency band between sigma lo (fine edge) and hi (coarse edge).
-    lo=0: no highpass (include all fine detail).
-    hi=0: no lowpass (include all coarse content).
+    lo=0: no low bound, include all low
+    hi=0: no high bound (include all high).
     Both 0: returns x unchanged.
     """
     upper = _gblur_torch(x, hi) if hi > 0.0 else x
