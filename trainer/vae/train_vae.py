@@ -532,6 +532,11 @@ def main() -> None:
         ).view(1, 1, 3, 3)
         lap_kernel = k.repeat(3, 1, 1, 1)
 
+    if args.freq_lowbound != 0:
+        print("freq_lowbound set to", args.freq_lowbound)
+    if args.freq_highbound != 0:
+        print("freq_highbound set to", args.freq_highbound)
+
     miner = None
     if args.crop_mining_weight > 0:
         miner = HardRegionMiner(
