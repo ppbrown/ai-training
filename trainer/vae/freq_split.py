@@ -135,10 +135,12 @@ def split_image_4(
     }
 
 
-def _preserve_hf_band(hf_signed: np.ndarray, orig: np.ndarray, threshold: float) -> np.ndarray:
+def _preserve_hf_band(hf_signed: np.ndarray, orig: np.ndarray, threshold: float, use_abs: bool = False) -> np.ndarray:
     """Return orig pixels where signed HF exceeds threshold, black elsewhere."""
-    #mask = hf_signed.max(axis=2) > threshold
-    mask = np.abs(hf_signed).max(axis=2) > threshold
+    if use_abs:
+        mask = np.abs(hf_signed).max(axis=2) > threshold
+    else:
+        mask = hf_signed.max(axis=2) > threshold
     out = np.zeros_like(orig)
     out[mask] = orig[mask]
     return out
@@ -174,7 +176,7 @@ def _analyze_worker(args: tuple) -> tuple[str, float]:
 
 def _worker(args: tuple) -> str | None:
     """Process a single image. Returns error string or None on success."""
-    img_path, out_dirs, lf_sigma, input_root, hf1_sigma, hf2_sigma, resize_target, preserve_hf, preserve_hf_threshold = args
+    img_path, out_dirs, lf_sigma, input_root, hf1_sigma, hf2_sigma, resize_target, preserve_hf, preserve_hf_threshold, use_hf_abs = args
     try:
         rel = img_path.relative_to(input_root)
         out_paths = {band: out_dirs[band] / rel.with_suffix(".png") for band in out_dirs}
@@ -189,7 +191,7 @@ def _worker(args: tuple) -> str | None:
             for top in HF_TOP_BANDS:
                 if top in bands_data:
                     bands_data[top] = _preserve_hf_band(
-                        bands_data[top], orig, preserve_hf_threshold
+                        bands_data[top], orig, preserve_hf_threshold, use_hf_abs
                     )
         for band, arr in bands_data.items():
             if band not in out_paths:
@@ -247,12 +249,16 @@ def main() -> None:
     parser.add_argument("--hf2_sigma", type=float, default=DEFAULT_HF2_SIGMA,
                         help=f"(4-band) Sigma for HF2/HF3 boundary (default: {DEFAULT_HF2_SIGMA}. best is probably 1.5)")
 
-    parser.add_argument("--workers", type=int, default=mp.cpu_count(),
-                        help="Parallel worker count (default: cpu count)")
+    parser.add_argument("--workers", type=int, default=max(1, mp.cpu_count() - 1),
+                        help="Parallel worker count (default: cpu count - 1)")
     parser.add_argument("--preserve_hf", action="store_true",
-                        help="Write original pixel values at active HF locations instead of "
-                             "clipping the signed residual; inactive (near-zero) pixels become black. "
-                             "Applies only to the top HF band (hf in 2-band, hf3 in 4-band).")
+                        help="YOU PROBABLY WANT TO USE THIS. "
+                        "Write original pixel values at active HF locations instead of "
+                        "clipping the signed residual; inactive (near-zero) pixels become black. "
+                        "Applies only to the top HF band (hf in 2-band, hf3 in 4-band).")
+    parser.add_argument("--use_hf_abs", action="store_true",
+                        help="Use abs() when computing the HF activity mask in --preserve_hf "
+                             "(catches negative as well as positive residuals); default is positive-only")
     parser.add_argument("--preserve_hf_threshold", type=float, default=DEFAULT_PRESERVE_HF_THRESHOLD,
                         help=f"Signed HF per-pixel max above which a pixel is considered active "
                              f"for --preserve_hf (default: {DEFAULT_PRESERVE_HF_THRESHOLD})")
@@ -367,7 +373,7 @@ def main() -> None:
         return
 
     work = [
-        (p, out_dirs, args.lf_sigma, args.input, hf1_sigma, hf2_sigma, args.resize_target, args.preserve_hf, args.preserve_hf_threshold)
+        (p, out_dirs, args.lf_sigma, args.input, hf1_sigma, hf2_sigma, args.resize_target, args.preserve_hf, args.preserve_hf_threshold, args.use_hf_abs)
         for p in images
     ]
 
