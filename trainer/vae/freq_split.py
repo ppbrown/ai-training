@@ -137,7 +137,8 @@ def split_image_4(
 
 def _preserve_hf_band(hf_signed: np.ndarray, orig: np.ndarray, threshold: float) -> np.ndarray:
     """Return orig pixels where signed HF exceeds threshold, black elsewhere."""
-    mask = hf_signed.max(axis=2) > threshold
+    #mask = hf_signed.max(axis=2) > threshold
+    mask = np.abs(hf_signed).max(axis=2) > threshold
     out = np.zeros_like(orig)
     out[mask] = orig[mask]
     return out
