@@ -1,57 +1,21 @@
 #!/bin/env python3
 
 """
-merge_splitvae.py
+merge_splitvae_auto.py
 
-Merge any number of channel-masked specialist VAEs (produced by split_vae.py
-and then trained independently) into a single standard AutoencoderKL ready for
-polish training.
+Reassembles copies of a vae that have had various channels zeroed.
+(presumably by split_vae.py)
 
-All model_* subdirectories in SPLIT_DIR that contain a split_config.json are
-discovered automatically.  The script reports how many specialist models were
-found, which channel ranges each owns, and which channels (if any) have no
-specialist coverage.
+This script autodetects zeros by inspecting the channel-aligned layers of
+each candidate model: split_vae.py physically zeroes the weights of
+inactive channels before saving, so a latent channel is "active" in a
+specialist if any of its corresponding rows/columns in the four
+channel-aligned layers are non-zero.
 
-Conceptual model
-----------------
-An AutoencoderKL's weights split into two categories:
-
-  - "Backbone" weights operate on inner feature maps that have no per-latent-
-    channel identity. Most of the network (encoder downblocks, decoder
-    upblocks, mid blocks, all norms) falls into this category.
-
-  - "Channel-aligned" weights have at least one dimension whose index
-    corresponds directly to a specific latent channel.
-
-The merge rule is:
-
-  - Backbone weights -> from --base (one source, chosen by the user).
-  - Channel-aligned weights -> rebuilt by summing all specialists.
-    split_vae.py physically zeroes inactive channels in each specialist
-    before saving, so a simple element-wise sum places every specialist's
-    trained weights in the correct positions with no per-channel indexing.
-
-Where the channel-aligned weights live
---------------------------------------
-In a diffusers AutoencoderKL there are exactly four layers with channel-
-aligned weights:
-
-  Encoder side - latent channel n corresponds to output channel n (mean)
-  and output channel n + latent_channels (logvar):
-      encoder.conv_out   produces 2*latent_channels of moments
-      quant_conv         1x1 conv refining those moments
-
-  Decoder side - latent channel n corresponds to input channel n:
-      post_quant_conv    1x1 conv on the latent
-      decoder.conv_in    first decoder conv consuming the latent
-
-Every other layer is backbone.
-
-The --base choice
------------------
-  NAME:  postfix of one of the discovered specialists (e.g. "lf", "hf").
-         That specialist's full checkpoint is used for backbone weights.
-  PATH:  external checkpoint (e.g. the original model before split).
+All model_* subdirectories in SPLIT_DIR are treated as candidate
+specialists. The script reports how many were found, which channel ranges
+each owns (as detected), and which channels (if any) have no specialist
+coverage.
 
 CLI usage
 ---------
@@ -63,8 +27,6 @@ CLI usage
 from __future__ import annotations
 
 import argparse
-import json
-import sys
 from pathlib import Path
 
 import torch
@@ -101,6 +63,48 @@ def _format_zero_ranges(channels: list[int]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Autodetection
+# ---------------------------------------------------------------------------
+
+ZERO_THRESH = 1e-6   # max_abs below this -> channel counts as zeroed
+
+
+def _detect_active_channels(
+    model: AutoencoderKL,
+    latent: int,
+    zero_thresh: float = ZERO_THRESH,
+) -> list[int]:
+    """
+    Return the sorted list of latent channels that are active (not zeroed)
+    in the channel-aligned layers of model.
+
+    Mirrors channel_analyzer.py's zero classification exactly: a channel's
+    "activity" is min(enc_max, dec_max), where enc_max is the max-abs weight
+    of encoder.conv_out's mean-output row for that channel and dec_max is
+    the max-abs weight of decoder.conv_in's column for that channel. Using
+    post_quant_conv instead of decoder.conv_in here is wrong -- specialists
+    can carry leftover non-zero post_quant_conv weight for channels they
+    don't own (it isn't reliably zeroed by split_vae.py), which makes such
+    channels look active when decoder.conv_in shows they are not.
+
+    encoder.conv_out is indexed on the output side: latent channel n's mean
+    output is row n. decoder.conv_in is indexed on the input side: latent
+    channel n owns column n.
+    """
+    eco = model.encoder.conv_out.weight
+    dci = model.decoder.conv_in.weight
+
+    active: list[int] = []
+    with torch.no_grad():
+        for n in range(latent):
+            enc_max = eco[n].abs().max().item()
+            dec_max = dci[:, n].abs().max().item()
+            if min(enc_max, dec_max) >= zero_thresh:
+                active.append(n)
+    return active
+
+
+# ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 
@@ -109,33 +113,32 @@ Specialist = tuple[str, AutoencoderKL, list[int]]  # (dir_name, model, active_ch
 
 def load_specialists(split_dir: Path) -> tuple[int, list[Specialist]]:
     """
-    Discover all model_* subdirs in split_dir that contain split_config.json,
-    load each AutoencoderKL, and return (latent_channels, specialists) sorted
-    by first active channel.
+    Discover all model_* subdirs in split_dir, load each AutoencoderKL,
+    autodetect its active channels, and return (latent_channels, specialists)
+    sorted by first active channel.
 
     Raises FileNotFoundError if none are found, ValueError if latent_channels
     disagrees across models.
     """
     dirs = sorted(
         p for p in split_dir.iterdir()
-        if p.is_dir() and (p / "split_config.json").exists()
+        if p.is_dir() and p.name.startswith("model_")
     )
     if not dirs:
-        raise FileNotFoundError(f"No specialist models (model_*/split_config.json) found in {split_dir}")
+        raise FileNotFoundError(f"No specialist models (model_*/) found in {split_dir}")
 
     specialists: list[Specialist] = []
     latent: int | None = None
     for d in dirs:
-        cfg = json.loads((d / "split_config.json").read_text())
-        lc = cfg["latent_channels"]
+        model = AutoencoderKL.from_pretrained(str(d))
+        lc = model.config.latent_channels
         if latent is None:
             latent = lc
         elif lc != latent:
             raise ValueError(
                 f"{d.name}: latent_channels={lc} disagrees with earlier value {latent}"
             )
-        model = AutoencoderKL.from_pretrained(str(d))
-        active = sorted(cfg["active_channels"])
+        active = _detect_active_channels(model, lc)
         specialists.append((d.name, model, active))
 
     specialists.sort(key=lambda s: s[2][0] if s[2] else 0)
@@ -155,10 +158,9 @@ def _splice_channel_aligned_layers(
     Rebuild the four channel-aligned layers in merged by zeroing them and
     then summing contributions from all specialists.
 
-    Because split_vae.py physically zeroes inactive channels before saving,
-    each specialist contributes non-zero values only for its own channels.
-    The sum therefore assembles the correct weights for every channel with
-    no per-channel index arithmetic.
+    Because each specialist contributes non-zero values only for its own
+    (autodetected) channels, the sum assembles the correct weights for
+    every channel with no per-channel index arithmetic.
 
     Decoder-side biases (post_quant_conv.bias, decoder.conv_in.bias) are
     indexed by decoder output features, not latent channels, so they are
@@ -207,11 +209,13 @@ def merge_split(
     base: str | Path = "hf",
 ) -> AutoencoderKL:
     """
-    Discover all specialist models in split_dir, report coverage, and merge
-    their channel-aligned weights into a single AutoencoderKL.
+    Discover all specialist models in split_dir, autodetect their active
+    channels, report coverage, and merge their channel-aligned weights into
+    a single AutoencoderKL.
 
     Args:
-        split_dir: directory produced by split_vae.py containing model_*/ subdirs.
+        split_dir: directory containing model_*/ subdirs (e.g. produced by
+                   split_vae.py and then trained independently).
         base: source for backbone (non-channel-aligned) weights. Either the
               postfix of a discovered specialist (e.g. "lf", "hf") or the
               full name of a subdir (e.g. "model_lf"), or a path to another
@@ -228,7 +232,7 @@ def merge_split(
     print(f"Found {n} specialist model{'s' if n != 1 else ''}:")
     all_active: set[int] = set()
     for name, _, active in specialists:
-        print(f"  {name}: channels {_format_ranges(active)}")
+        print(f"  {name}: detected channels {_format_ranges(active)}")
         all_active.update(active)
 
     zero = sorted(set(range(latent)) - all_active)
@@ -314,12 +318,13 @@ def verify_merge(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Merge channel-masked specialist VAEs into a single AutoencoderKL.",
+        description="Merge channel-masked specialist VAEs into a single AutoencoderKL "
+                    "(autodetecting each specialist's active channels, no split_config.json needed).",
     )
     ap.add_argument(
         "split_dir",
         type=str,
-        help="Directory containing model_*/ subdirs produced by split_vae.py.",
+        help="Directory containing model_*/ subdirs (channel-masked specialist checkpoints).",
     )
     ap.add_argument(
         "-o", "--out-dir",
