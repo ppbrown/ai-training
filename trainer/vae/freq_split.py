@@ -108,21 +108,19 @@ def _resize_arr(arr: np.ndarray, target: int) -> np.ndarray:
     ], axis=2)
 
 
-def split_image(img_path: Path, lf_sigma: float) -> dict[str, np.ndarray]:
+def split_image(arr: np.ndarray, lf_sigma: float) -> dict[str, np.ndarray]:
     """2-band split: returns {'lf', 'hf', '_orig'}."""
-    arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
     lf = _gblur(arr, lf_sigma)
     return {"lf": lf, "hf": arr - lf, "_orig": arr}
 
 
 def split_image_4(
-    img_path: Path,
+    arr: np.ndarray,
     lf_sigma: float,
     hf1_sigma: float,
     hf2_sigma: float,
 ) -> dict[str, np.ndarray]:
     """4-band split: returns {'lf', 'hf1', 'hf2', 'hf3', '_orig'}."""
-    arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.float32) / 255.0
     lf   = _gblur(arr, lf_sigma)
     mid1 = _gblur(arr, hf1_sigma)
     mid2 = _gblur(arr, hf2_sigma)
@@ -182,10 +180,15 @@ def _worker(args: tuple) -> str | None:
         out_paths = {band: out_dirs[band] / rel.with_suffix(".png") for band in out_dirs}
         if all(p.exists() for p in out_paths.values()):
             return None
+        img = Image.open(img_path).convert("RGB")
+        if resize_target and min(img.size) >= 4000:
+            w, h = img.size
+            img = img.resize((round(w * 0.5), round(h * 0.5)), Image.BICUBIC)
+        arr = np.array(img, dtype=np.float32) / 255.0
         if hf1_sigma is not None:
-            bands_data = split_image_4(img_path, lf_sigma, hf1_sigma, hf2_sigma)
+            bands_data = split_image_4(arr, lf_sigma, hf1_sigma, hf2_sigma)
         else:
-            bands_data = split_image(img_path, lf_sigma)
+            bands_data = split_image(arr, lf_sigma)
         orig = bands_data.pop("_orig")
         if preserve_hf:
             for top in HF_TOP_BANDS:
