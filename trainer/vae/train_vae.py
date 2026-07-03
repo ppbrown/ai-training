@@ -29,6 +29,7 @@ from train_datatools import (
 )
 
 from train_hard_region import HardRegionMiner
+from train_posthoc_ema import PowerEma
 from train_discriminator import (
     NLayerDiscriminator,
     hinge_d_loss,
@@ -182,6 +183,51 @@ def _register_channel_freeze_hooks(vae, channels: list) -> list:
         handles.append(mod.weight.register_hook(dec_col_hook(ch)))
 
     return handles
+
+
+# -----------------------------
+# EMA
+# -----------------------------
+
+class EmaWeights:
+    """
+    Exponential moving average of trainable model parameters.
+
+    update() after every optimizer step. At checkpoint time, apply_to()
+    swaps the EMA weights into the model (backing up the live weights),
+    then restore() swaps the live weights back so training continues
+    unaffected.
+    """
+
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {
+            n: p.detach().clone()
+            for n, p in model.named_parameters() if p.requires_grad
+        }
+        self.backup: dict = {}
+
+    @torch.no_grad()
+    def update(self, model):
+        for n, p in model.named_parameters():
+            if n in self.shadow:
+                # shadow = decay * shadow + (1 - decay) * p
+                self.shadow[n].lerp_(p.detach(), 1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_to(self, model):
+        self.backup = {}
+        for n, p in model.named_parameters():
+            if n in self.shadow:
+                self.backup[n] = p.detach().clone()
+                p.copy_(self.shadow[n])
+
+    @torch.no_grad()
+    def restore(self, model):
+        for n, p in model.named_parameters():
+            if n in self.backup:
+                p.copy_(self.backup[n])
+        self.backup = {}
 
 
 # -----------------------------
@@ -470,6 +516,17 @@ def main() -> None:
             _channel_freeze_handles = _register_channel_freeze_hooks(vae, ch)
             print(f"Freezing channels {ch[0]}-{ch[-1]} via gradient hooks")
 
+    ema = None
+    if args.use_ema:
+        ema = EmaWeights(vae, decay=args.ema_decay)
+        print(f"EMA enabled, decay={args.ema_decay}")
+
+    ph_ema = None
+    if args.posthoc_ema:
+        ph_ema = PowerEma(vae, sigma_rels=args.ph_ema_sigma_rels)
+        print(f"Post-hoc EMA enabled: sigma_rels={args.ph_ema_sigma_rels}"
+              f" (gammas={[round(g, 2) for g in ph_ema.gammas]})")
+
     lpips_fn = None
     if args.lpips_weight > 0:
         if args.lpips_rawvgg:
@@ -615,9 +672,15 @@ def main() -> None:
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if args.max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
         opt.step()
         if scheduler is not None:
             scheduler.step()
+        if ema is not None:
+            ema.update(vae)
+        if ph_ema is not None:
+            ph_ema.update(vae)
 
         if disc is not None:
             disc_update(disc, opt_d, x, dec, args, step)
@@ -634,9 +697,15 @@ def main() -> None:
             )
             opt.zero_grad(set_to_none=True)
             extra_loss.backward()
+            if args.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
             opt.step()
             if scheduler is not None:
                 scheduler.step()
+            if ema is not None:
+                ema.update(vae)
+            if ph_ema is not None:
+                ph_ema.update(vae)
             if disc is not None:
                 disc_update(disc, opt_d, x_extra, extra_dec, args, step)
             step += 1
@@ -685,6 +754,25 @@ def main() -> None:
                     out_path=ckpt_dir / "vae_sample.webp",
                 )
 
+            if ema is not None:
+                ema.apply_to(vae)
+                ema_dir = ckpt_dir / "ema"
+                vae.save_pretrained(str(ema_dir))
+                print(f"Saved EMA: {ema_dir}", flush=True)
+                if sample_img_path is not None:
+                    write_vae_sample_webp(
+                        vae_model=vae,
+                        sample_img=sample_img_path,
+                        target_w=sample_tw,
+                        target_h=sample_th,
+                        out_path=ema_dir / "vae_sample.webp",
+                    )
+                ema.restore(vae)
+
+            if ph_ema is not None:
+                ph_ema.save_snapshots(out_dir / "ph_ema")
+                print(f"Saved ph_ema snapshots (t={ph_ema.t})", flush=True)
+
     # Final save
     final_dir = out_dir / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
@@ -699,6 +787,25 @@ def main() -> None:
             target_h=sample_th,
             out_path=final_dir / "vae_sample.webp",
         )
+
+    if ema is not None:
+        ema.apply_to(vae)
+        ema_dir = final_dir / "ema"
+        vae.save_pretrained(str(ema_dir))
+        print(f"saved EMA: {ema_dir}", flush=True)
+        if sample_img_path is not None:
+            write_vae_sample_webp(
+                vae_model=vae,
+                sample_img=sample_img_path,
+                target_w=sample_tw,
+                target_h=sample_th,
+                out_path=ema_dir / "vae_sample.webp",
+            )
+        ema.restore(vae)
+
+    if ph_ema is not None:
+        ph_ema.save_snapshots(out_dir / "ph_ema")
+        print(f"Saved ph_ema snapshots (t={ph_ema.t})", flush=True)
 
 
 if __name__ == "__main__":
