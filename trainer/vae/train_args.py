@@ -53,6 +53,24 @@ def parseargs():
     ap.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     ap.add_argument("--warmup_steps", type=int, default=0,
                     help="Linearly warm up LR from 0 to --lr over this many optimizer steps. 0 disables warmup.")
+    ap.add_argument("--max_grad_norm", type=float, default=1.0,
+                    help="Clip VAE gradient norm to this before each optimizer step."
+                         " 0 disables clipping.")
+    ap.add_argument("--use_ema", action="store_true",
+                    help="Track an exponential moving average of trainable weights."
+                         " At each checkpoint the EMA model is saved under <ckpt>/ema"
+                         " with its own vae_sample.webp.")
+    ap.add_argument("--ema_decay", type=float, default=0.999,
+                    help="EMA decay per optimizer step. Only used with --use_ema.")
+    ap.add_argument("--posthoc_ema", action="store_true",
+                    help="Track power-function EMA accumulators (EDM2 post-hoc EMA)."
+                         " fp16 snapshots are written to <output_dir>/ph_ema at every"
+                         " checkpoint; after training, run reconstruct_ph_ema.py to"
+                         " synthesize an EMA of any averaging length."
+                         " Independent of --use_ema.")
+    ap.add_argument("--ph_ema_sigma_rels", type=float, nargs="+", default=[0.05, 0.10],
+                    help="sigma_rel of the tracked power-EMA accumulators."
+                         " The defaults (0.05, 0.10) span most useful lengths.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
     ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
