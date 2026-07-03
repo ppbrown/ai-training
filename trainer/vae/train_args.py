@@ -93,9 +93,6 @@ def parseargs():
     ap.add_argument("--lpips_rawvgg", action="store_true",
                     help="Use LPIPS module but set lpips=False. Which oddly, gives you 'raw VGG'")
 
-    ap.add_argument("--gram_weight", type=float, default=0.0,
-               help="Gram matrix texture loss weight (0=disabled)")
-
     ap.add_argument(
         "--hf_luma_only", action="store_true",
         help="Compute edge/laplacian losses on luma (Y) only"
@@ -136,7 +133,13 @@ def parseargs():
     ap.add_argument("--crop_shapeonly",     action="store_true")
 
     ap.add_argument("--disc_weight",  type=float, default=0.0,
-                    help="Enable 'Discriminator' (aka GAN based) loss calc")
+                    help="Enable 'Discriminator' (aka GAN based) loss calc."
+                         " By default this multiplies an adaptive scale that matches"
+                         " the GAN gradient to the recon gradient at decoder.conv_out"
+                         " (taming-transformers style); 0.5 is the usual LDM value.")
+    ap.add_argument("--disc_no_adaptive", action="store_true",
+                    help="Use --disc_weight as a fixed scale on the generator loss"
+                         " instead of multiplying the adaptive gradient-ratio scale.")
     ap.add_argument("--disc_start",   type=int,   default=50000,
                     help="What step it should kick in at")
     ap.add_argument("--disc_lr",      type=float, default=2e-4,

@@ -15,7 +15,9 @@ Usage:
 
     # In training loop - generator step (VAE update):
     g_loss = generator_hinge_loss(disc(dec))
-    loss = loss + args.disc_weight * g_loss
+    d_weight = args.disc_weight * calculate_adaptive_weight(
+        loss, g_loss, vae.decoder.conv_out.weight)
+    loss = loss + d_weight * g_loss
 
     # In training loop - discriminator step (disc update):
     opt_d.zero_grad(set_to_none=True)
@@ -36,9 +38,13 @@ disc_start:
     reconstruction, causing collapse.
 
 disc_weight:
-    Start at 0.1. This is intentionally low - the discriminator is a
-    nudge toward sharpness, not the primary training signal.
-    Your L1 + LPIPS remain the accuracy anchor.
+    In the default adaptive mode, g_loss is first rescaled so its gradient
+    at decoder.conv_out matches the reconstruction gradient norm, and
+    disc_weight multiplies that. 0.5 is the standard LDM value; 1.0 means
+    "as strong as the recon signal".
+    With --disc_no_adaptive, disc_weight is a fixed scale instead: start
+    at 0.1 - intentionally low, a nudge toward sharpness rather than the
+    primary training signal. Your L1 + LPIPS remain the accuracy anchor.
     Signs it's too high: global color/structure accuracy regresses.
     Signs it's too low: no sharpness improvement after 20-30k steps
     past disc_start.
@@ -156,6 +162,35 @@ def generator_hinge_loss(logits_fake: torch.Tensor) -> torch.Tensor:
     Call this during the VAE update step.
     """
     return -torch.mean(logits_fake)
+
+
+def calculate_adaptive_weight(
+    rec_loss: torch.Tensor,
+    g_loss: torch.Tensor,
+    last_layer: torch.Tensor,
+    eps: float = 1e-4,
+    max_weight: float = 1e4,
+) -> torch.Tensor:
+    """
+    Adaptive generator-loss scale from taming-transformers.
+
+    Compares gradient norms of the reconstruction loss and the generator
+    hinge loss at the decoder's last layer (e.g. vae.decoder.conv_out.weight)
+    and returns their ratio, so the adversarial gradient is scaled to match
+    the reconstruction gradient regardless of how small the recon losses get.
+
+    Multiply the result by your base disc_weight:
+        d_weight = disc_weight * calculate_adaptive_weight(
+            rec_loss, g_loss, vae.decoder.conv_out.weight)
+        loss = rec_loss + d_weight * g_loss
+
+    last_layer must require grad; both losses must still be attached to the
+    graph (call this before .backward()).
+    """
+    rec_grads = torch.autograd.grad(rec_loss, last_layer, retain_graph=True)[0]
+    g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+    d_weight = torch.norm(rec_grads) / (torch.norm(g_grads) + eps)
+    return torch.clamp(d_weight, 0.0, max_weight).detach()
 
 
 def adopt_weight(weight: float, global_step: int, threshold: int = 0, value: float = 0.0) -> float:

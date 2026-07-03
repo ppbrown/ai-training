@@ -33,51 +33,16 @@ from train_discriminator import (
     NLayerDiscriminator,
     hinge_d_loss,
     generator_hinge_loss,
+    calculate_adaptive_weight,
     adopt_weight,
     weights_init,
 )
 from diffusers import AutoencoderKL
 
 
-import torchvision.models as tvm
-
 # -----------------------------
 # Loss helpers
 # -----------------------------
-
-vgg_slices: list | None = None
-
-def build_vgg_gram(device: torch.device):
-    """Load VGG16 and return a function that extracts features for Gram loss."""
-    vgg = tvm.vgg16(weights=tvm.VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
-    for p in vgg.parameters():
-        p.requires_grad_(False)
-    # Slices ending at relu1_2, relu2_2, relu3_3, relu4_3
-    slices = [
-        torch.nn.Sequential(*list(vgg.children())[:4]),   # relu1_2
-        torch.nn.Sequential(*list(vgg.children())[:9]),   # relu2_2
-        torch.nn.Sequential(*list(vgg.children())[:16]),  # relu3_3
-        torch.nn.Sequential(*list(vgg.children())[:23]),  # relu4_3
-    ]
-    return slices
-
-
-def gram_matrix(x: torch.Tensor) -> torch.Tensor:
-    B, C, H, W = x.shape
-    f = x.view(B, C, H * W)
-    return torch.bmm(f, f.transpose(1, 2)) / (C * H * W)
-
-
-def compute_gram_loss(vgg_slices, dec: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    loss = torch.tensor(0.0, device=dec.device)
-    feat_dec = dec
-    feat_x = x
-    for slice_ in vgg_slices:
-        feat_dec = slice_(feat_dec)
-        feat_x = slice_(feat_x)
-        loss = loss + F.l1_loss(gram_matrix(feat_dec), gram_matrix(feat_x.detach()))
-    return loss
-
 
 _gauss_kernel_cache: dict = {}
 
@@ -339,11 +304,6 @@ def compute_loss(
             lap_x = F.conv2d(x, lap_kernel, padding=1, groups=3)
         lap_loss = F.l1_loss(lap_dec, lap_x)
 
-    gram_loss_val = None
-    if vgg_slices is not None:
-        gram_loss_val = compute_gram_loss(vgg_slices, dec, x)
-        loss = loss + args.gram_weight * gram_loss_val
-
     hf_energy_loss = None
     if args.hf_energy_weight > 0:
         hf_energy_loss = F.l1_loss(hf_fft_dec.square(), hf_fft_x.square())
@@ -363,8 +323,6 @@ def compute_loss(
         loss = loss + args.laplacian_weight * lap_loss
     if hf_energy_loss is not None:
         loss = loss + args.hf_energy_weight * hf_energy_loss
-    if gram_loss_val is not None:
-        loss = loss + args.gram_weight * gram_loss_val
     if grad_energy_loss is not None:
         loss = loss + args.grad_energy_weight * grad_energy_loss
 
@@ -394,6 +352,12 @@ def compute_loss(
         d_weight = adopt_weight(args.disc_weight, step, threshold=args.disc_start)
         if d_weight > 0:
             g_loss = generator_hinge_loss(disc(dec))
+            if not args.disc_no_adaptive:
+                # Scale g_loss so its gradient at the decoder's last layer
+                # matches the reconstruction gradient (taming-transformers).
+                d_weight = d_weight * calculate_adaptive_weight(
+                    loss, g_loss, vae.decoder.conv_out.weight,
+                )
             loss = loss + d_weight * g_loss
 
     return loss, dec, l1, lp, edge_l1, lap_loss
@@ -517,12 +481,6 @@ def main() -> None:
         for p in lpips_fn.parameters():
             p.requires_grad_(False)
 
-    vgg_slices = None
-    if args.gram_weight > 0:
-        print(f"Using Gram matrix loss weight={args.gram_weight}")
-        vgg_slices = build_vgg_gram(device)
-
-
     lap_kernel = None
     if args.laplacian_weight != 0:
         print(f"Using Laplacian loss weight={args.laplacian_weight}")
@@ -559,7 +517,12 @@ def main() -> None:
             betas=(0.5, 0.9),
             weight_decay=0.0,
         )
-        print(f"Discriminator enabled, starts at step {args.disc_start}")
+        if not args.disc_no_adaptive and not vae.decoder.conv_out.weight.requires_grad:
+            args.disc_no_adaptive = True
+            print("WARNING: decoder.conv_out is frozen;"
+                  " disabling adaptive disc weight (using fixed --disc_weight)")
+        mode = "fixed" if args.disc_no_adaptive else "adaptive"
+        print(f"Discriminator enabled ({mode} weight), starts at step {args.disc_start}")
 
     if args.hires_tiling:
         print("Tiling enabled: each image produces 1 whole-image + 4 tile optimizer steps.")
