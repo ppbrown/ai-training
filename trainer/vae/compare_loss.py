@@ -2,10 +2,19 @@
 """
  Meant to be used as an alternative to tensorboard tracking of loss
  during VAE training.
- When you have enabled saving of a test image with each checkpoint, 
+ When you have enabled saving of a test image with each checkpoint,
  use this tool to compare original image to each checkpoint's sample.
 
-Usage: python compare_losss.py <original> <sample1> [sample2 ...]
+Usage: python compare_loss.py <original> <sample1> [sample2 ...]
+
+Can also be imported and used as a subroutine from another program:
+
+    from compare_loss import compute_losses, load_vgg
+
+    vgg_loss = load_vgg()  # load once, reuse across many calls
+    results = compute_losses(original_path, sample_paths, vgg_loss)
+    for r in results:
+        print(r["path"], r["l1"], r["rawvgg"], r["edge"], r["lap"])
 
 Note: lazy hardcode to use CPU not cuda so safe to use while training
 is running. You really dont need cuda anyway, its reasonably fast
@@ -20,7 +29,6 @@ from torchvision import transforms
 
 #DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEVICE = "cpu"
-print("Using",DEVICE)
 PADDING = 40
 
 to_tensor = transforms.ToTensor()  # [0,1]
@@ -54,40 +62,64 @@ def edge_loss(a: torch.Tensor, b: torch.Tensor) -> float:
     return F.l1_loss(edges(a), edges(b)).item()
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: rate_samples.py <original> <sample1> [sample2 ...]")
-        sys.exit(1)
+def load_vgg(device: str = DEVICE) -> lpips.LPIPS:
+    """Load the VGG-based LPIPS model. Call once and pass to compute_losses
+    when making repeated calls, to avoid reloading the network each time."""
+    print("Loading VGG (rawvgg mode)...", flush=True)
+    return lpips.LPIPS(net="vgg", lpips=False).to(device)
 
-    original_path = sys.argv[1]
-    sample_paths  = sys.argv[2:]
 
-    print(f"Loading VGG (rawvgg mode)...", flush=True)
-    vgg_loss = lpips.LPIPS(net="vgg", lpips=False).to(DEVICE)
+def compute_losses(original_path: str, sample_paths: list[str],
+                    vgg_loss: lpips.LPIPS | None = None) -> list[dict]:
+    """Compare an original image to one or more sample images.
+
+    Returns a list of dicts (one per sample path) with keys:
+    path, l1, rawvgg, edge, lap.
+    """
+    if vgg_loss is None:
+        vgg_loss = load_vgg()
 
     orig_01, orig_11 = load(original_path)
-
-    # Resize samples to original size if needed
     h, w = orig_01.shape[2], orig_01.shape[3]
 
-    header = f"{'image':<{PADDING}} {'l1':>8} {'rawvgg':>10} {'edge':>8} {'lap':>8}"
-    print(f"\n{header}")
-    print("-" * len(header))
-
+    results = []
     for path in sample_paths:
         s01, s11 = load(path)
 
         if s01.shape[2:] != orig_01.shape[2:]:
             raise ValueError(f"Size mismatch: original {(h,w)}, {path} {tuple(s01.shape[2:])}")
 
-        l1     = F.l1_loss(s01, orig_01).item()
-        vgg    = vgg_loss(s11, orig_11).item()
-        edge   = edge_loss(s01, orig_01)
-        lap    = laplacian_loss(s01, orig_01)
+        results.append({
+            "path":   path,
+            "l1":     F.l1_loss(s01, orig_01).item(),
+            "rawvgg": vgg_loss(s11, orig_11).item(),
+            "edge":   edge_loss(s01, orig_01),
+            "lap":    laplacian_loss(s01, orig_01),
+        })
 
-#        name = path.split("/")[-1][:PADDING]
-        name = path
-        print(f"{name:<{PADDING}} {l1:>8.4f} {vgg:>10.4f} {edge:>8.4f} {lap:>8.4f}")
+    return results
+
+
+def print_results(results: list[dict]) -> None:
+    header = f"{'image':<{PADDING}} {'l1':>8} {'rawvgg':>10} {'edge':>8} {'lap':>8}"
+    print(f"\n{header}")
+    print("-" * len(header))
+    for r in results:
+        print(f"{r['path']:<{PADDING}} {r['l1']:>8.4f} {r['rawvgg']:>10.4f} "
+              f"{r['edge']:>8.4f} {r['lap']:>8.4f}")
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python compare_loss.py <original> <sample1> [sample2 ...]")
+        sys.exit(1)
+
+    print("Using", DEVICE)
+    original_path = sys.argv[1]
+    sample_paths  = sys.argv[2:]
+
+    results = compute_losses(original_path, sample_paths)
+    print_results(results)
 
 
 if __name__ == "__main__":
