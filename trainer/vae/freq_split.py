@@ -181,9 +181,11 @@ def _worker(args: tuple) -> str | None:
         if all(p.exists() for p in out_paths.values()):
             return None
         img = Image.open(img_path).convert("RGB")
-        if resize_target and min(img.size) >= 4000:
-            w, h = img.size
-            img = img.resize((round(w * 0.5), round(h * 0.5)), Image.BICUBIC)
+        if resize_target:
+            pre_threshold = 3072 if resize_target == 512 else 4096
+            while min(img.size) > pre_threshold:
+                w, h = img.size
+                img = img.resize((round(w * 0.5), round(h * 0.5)), Image.BICUBIC)
         arr = np.array(img, dtype=np.float32) / 255.0
         if hf1_sigma is not None:
             bands_data = split_image_4(arr, lf_sigma, hf1_sigma, hf2_sigma)
