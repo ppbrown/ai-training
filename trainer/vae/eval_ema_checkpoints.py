@@ -11,12 +11,13 @@ image for:
     (see reconstruct_ph_ema.py)
 
 Both axes self-adjust from what's actually in ph_ema/ unless overridden:
-  - --step is optional. Without it, the sweep covers the last 5 available
-    steps. With it, the sweep covers that step plus the 2 available steps
-    before and after it (by position in the available list, not raw step
-    arithmetic), clamped so it never reaches past the last actual
-    checkpoint - e.g. picking the newest available step still gives you
-    the last 5, not a request for 2 steps that don't exist yet.
+  - --step is optional. Without it, the sweep covers the last --step_sweep
+    steps (default 5). With it, the sweep covers that step plus
+    --step_sweep // 2 available steps before and after it (by position in
+    the available list, not raw step arithmetic), clamped so it never
+    reaches past the last actual checkpoint - e.g. picking the newest
+    available step still gives you the last --step_sweep, not a request
+    for steps that don't exist yet.
   - --sigma_rels defaults to 5 points spanning the sigma_rel anchors
     actually saved in ph_ema/
 
@@ -25,8 +26,8 @@ and ph_ema/):
 
     python eval_ema_checkpoints.py --test_img /data/test/sample.jpg
 
-Center the 5-step window on a specific step once you know which region
-of training matters:
+Center the --step_sweep window (default 5) on a specific step once you
+know which region of training matters:
 
     python eval_ema_checkpoints.py --step 150000 --test_img /data/test/sample.jpg
 
@@ -41,10 +42,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-import lpips
 
 from train_datatools import load_image_tensor
 from reconstruct_ph_ema import reconstruct_state, load_autoencoder, apply_state, scan_snapshots
+from compare_loss import load_vgg
 
 
 def available_steps(ph_ema_dir: Path) -> list:
@@ -118,20 +119,40 @@ def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
     return 10.0 * np.log10(1.0 / mse)
 
 
+def quantize_delivered(x_01: torch.Tensor) -> torch.Tensor:
+    """Round-trip through uint8 quantization, matching the actual delivered image
+    (see tensor_to_pil_rgb in train_datatools.py) instead of scoring the raw
+    float32 decoder output nobody will ever actually see."""
+    return (x_01.clamp(0.0, 1.0) * 255.0).round() / 255.0
+
+
 @torch.no_grad()
 def evaluate(vae, x_pm1: torch.Tensor, lpips_fn) -> dict:
-    """x_pm1: (1, 3, H, W) in [-1, 1]. Runs encode/decode and scores against x_pm1."""
+    """x_pm1: (1, 3, H, W) in [-1, 1]. Runs encode/decode, quantizes the decode to
+    uint8 (the actual delivered image), and scores against x_pm1."""
     was_training = vae.training
     vae.eval()
+
+    # Match write_vae_sample_webp: full fp32 precision, no TF32 rounding,
+    # since that's what actually produced the delivered image.
+    prev_matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     dec = vae.decode(vae.encode(x_pm1).latent_dist.mean).sample
+
+    torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
+    torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
     if was_training:
         vae.train()
 
     x_01 = (x_pm1 / 2 + 0.5).clamp(0, 1)
-    dec_01 = (dec / 2 + 0.5).clamp(0, 1)
+    dec_01 = quantize_delivered(dec / 2 + 0.5)
+    dec_pm1 = dec_01 * 2 - 1
     return {
-        "l1": F.l1_loss(dec, x_pm1).item(),
-        "lpips": lpips_fn(dec, x_pm1).mean().item(),
+        "l1": F.l1_loss(dec_01, x_01).item(),
+        "lpips": lpips_fn(dec_pm1, x_pm1).mean().item(),
         "psnr": psnr(dec_01, x_01),
         "ssim": ssim(dec_01, x_01),
     }
@@ -143,10 +164,15 @@ def main():
                     help="train_vae.py's --output_dir (contains step_NNNNNN/ dirs and ph_ema/)."
                          " Defaults to the current directory.")
     ap.add_argument("--step", type=int, default=None,
-                    help="Center step for a 5-checkpoint-wide sweep (that step plus"
-                         " the 2 available steps before and after it, clamped to"
-                         " what's actually on disk). Must match a step with a"
-                         " ph_ema snapshot. Defaults to the last 5 available steps.")
+                    help="Center step for a sweep (that step plus"
+                         " step_sweep // 2 available steps before and after it,"
+                         " clamped to what's actually on disk). Must match a"
+                         " step with a ph_ema snapshot. Defaults to the last"
+                         " step_sweep available steps.")
+    ap.add_argument("--step_sweep", type=int, default=5,
+                    help="Width of the step window: this many steps total,"
+                         " centered on --step (or the most recent steps if"
+                         " --step is omitted).")
     ap.add_argument("--test_img", default="/data/models/sampleimg-full-hf-512.png")
     ap.add_argument("--sigma_rels", type=float, nargs="+", default=None,
                     help="Post-hoc EMA lengths to reconstruct and evaluate at each step."
@@ -161,7 +187,7 @@ def main():
     out_dir = Path(args.output_dir)
     ph_ema_dir = out_dir / "ph_ema"
 
-    steps = step_window(available_steps(ph_ema_dir), args.step)
+    steps = step_window(available_steps(ph_ema_dir), args.step, width=args.step_sweep)
     sigma_rels = args.sigma_rels if args.sigma_rels is not None else auto_sigma_rels(ph_ema_dir)
     print(f"steps: {steps}")
     print(f"sigma_rels sweep: {sigma_rels}")
@@ -169,7 +195,7 @@ def main():
     x = load_image_tensor(Path(args.test_img), 512, 512)
     x = x.unsqueeze(0).to(device, dtype=torch.float32)
 
-    lpips_fn = lpips.LPIPS(net="vgg").to(device)
+    lpips_fn = load_vgg(device)
     lpips_fn.eval()
     for p in lpips_fn.parameters():
         p.requires_grad_(False)
@@ -195,11 +221,11 @@ def main():
             del vae, combined
 
     print()
-    header = f"{'step':>8} {'candidate':<12} {'l1':>8} {'lpips':>8} {'psnr':>8} {'ssim':>8}"
+    header = f"{'step':>8} {'candidate':<12} {'l1':>8} {'lpips(vgg)':>10} {'psnr':>8} {'ssim':>8}"
     print(header)
     print("-" * len(header))
     for step, name, m in rows:
-        print(f"{step:8d} {name:<12} {m['l1']:8.4f} {m['lpips']:8.4f} {m['psnr']:8.2f} {m['ssim']:8.4f}")
+        print(f"{step:8d} {name:<12} {m['l1']:8.4f} {m['lpips']:10.4f} {m['psnr']:8.2f} {m['ssim']:8.4f}")
 
 
 if __name__ == "__main__":
