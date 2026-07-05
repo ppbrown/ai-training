@@ -15,7 +15,7 @@ Sweep several lengths and compare with your validation tooling:
             --sigma_rel $sr --output_dir out/ema_sr$sr
     done
 
-The reconstruction target step is --max_t if given, else the newest
+The reconstruction target step is --step if given, else the newest
 snapshot's step in --ph_ema_dir. --base_config is optional and defaults
 to <ph_ema_dir>/../step_NNNNNN for that target step (the raw checkpoint
 train_vae.py saves alongside each ph_ema snapshot batch). Pass
@@ -51,21 +51,21 @@ def scan_snapshots(ph_ema_dir: Path):
     return snaps
 
 
-def reconstruct_state(ph_ema_dir: Path, sigma_rel: float, max_t: int = None,
+def reconstruct_state(ph_ema_dir: Path, sigma_rel: float, step: int = None,
                        verbose: bool = True) -> dict:
     """
     Solve post-hoc EMA weights for sigma_rel from snapshots in ph_ema_dir.
-    Reconstructs at max_t if given, else at the newest snapshot's step.
+    Reconstructs at step if given, else at the newest snapshot's step.
     Returns the combined state dict (param name -> fp32 tensor).
     """
     snaps = scan_snapshots(ph_ema_dir)
-    if max_t is not None:
-        snaps = [s for s in snaps if s[0] <= max_t]
+    if step is not None:
+        snaps = [s for s in snaps if s[0] <= step]
         if not snaps:
-            raise SystemExit(f"No snapshots with t <= {max_t} in {ph_ema_dir}")
+            raise SystemExit(f"No snapshots with t <= {step} in {ph_ema_dir}")
     t_i = np.array([s[0] for s in snaps], dtype=np.float64)
     gamma_i = np.array([sigma_rel_to_gamma(s[1]) for s in snaps], dtype=np.float64)
-    t_r = float(max_t) if max_t is not None else t_i.max()
+    t_r = float(step) if step is not None else t_i.max()
     gamma_r = sigma_rel_to_gamma(sigma_rel)
 
     x = solve_weights(t_i, gamma_i, t_r, gamma_r)
@@ -124,12 +124,12 @@ def main():
                     help="Saved checkpoint dir this reconstruction borrows its"
                          " model config/architecture (and any non-EMA'd frozen"
                          " weights) from. Defaults to <ph_ema_dir>/../step_NNNNNN"
-                         " for the target step being reconstructed (see --max_t)."
+                         " for the target step being reconstructed (see --step)."
                          " Override to borrow architecture/frozen weights from a"
                          " different checkpoint instead.")
     ap.add_argument("-s","--sigma_rel", type=float, required=True,
                     help="Target averaging length. Try sweeping 0.02 - 0.15.")
-    ap.add_argument("--max_t", type=int, default=None,
+    ap.add_argument("--step", type=int, default=None,
                     help="Only use snapshots with t <= this step, and"
                          " reconstruct at this step instead of the newest"
                          " snapshot's step. Use this to reconstruct as of an"
@@ -144,10 +144,10 @@ def main():
     if args.base_config:
         base_config = Path(args.base_config)
     else:
-        t_r = args.max_t if args.max_t is not None else max(t for t, _, _ in scan_snapshots(ph_ema_dir))
+        t_r = args.step if args.step is not None else max(t for t, _, _ in scan_snapshots(ph_ema_dir))
         base_config = ph_ema_dir.parent / f"step_{t_r:06d}"
 
-    combined = reconstruct_state(ph_ema_dir, args.sigma_rel, args.max_t)
+    combined = reconstruct_state(ph_ema_dir, args.sigma_rel, args.step)
     vae = load_autoencoder(base_config)
     apply_state(vae, combined)
 

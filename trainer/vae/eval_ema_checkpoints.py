@@ -214,13 +214,14 @@ def main():
 
         for sr in sigma_rels:
             print(f"[step {step}] [ema sigma_rel={sr}] reconstructing from {base_config}")
-            combined = reconstruct_state(ph_ema_dir, sr, max_t=step, verbose=False)
+            combined = reconstruct_state(ph_ema_dir, sr, step=step, verbose=False)
             vae = load_autoencoder(base_config, device=device)
             apply_state(vae, combined)
             rows.append((step, f"sr{sr}", evaluate(vae, x, lpips_fn)))
             del vae, combined
 
     print()
+    print("Using test image of", args.test_img)
     header = f"{'step':>8} {'candidate':<12} {'l1':>8} {'lpips(vgg)':>10} {'psnr':>8} {'ssim':>8}"
     print(header)
     print("-" * len(header))
