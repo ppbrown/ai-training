@@ -68,12 +68,18 @@ def get_md5_from_file(filename):
             h.update(chunk)
     return h.hexdigest()
 
-def symlink_force(src, dst):
+def link_force(src, dst, use_hardlink):
     try:
-        os.symlink(os.path.abspath(src), dst)
+        if use_hardlink:
+            os.link(src, dst)
+        else:
+            os.symlink(os.path.abspath(src), dst)
     except FileExistsError:
         os.remove(dst)
-        os.symlink(os.path.abspath(src), dst)
+        if use_hardlink:
+            os.link(src, dst)
+        else:
+            os.symlink(os.path.abspath(src), dst)
 
 def main():
     if not DESTDIR or not os.path.isdir(DESTDIR):
@@ -82,6 +88,10 @@ def main():
     ensure_hash_dirs(DESTDIR)
     # Accept files from stdin, or use glob
     files = [line.strip() for line in sys.stdin if line.strip()]
+    if not files:
+        return
+    use_hardlink = os.stat(files[0]).st_dev == os.stat(DESTDIR).st_dev
+    print(f"{'Same' if use_hardlink else 'Different'} filesystem detected: using {'hard links' if use_hardlink else 'symlinks'}")
     for imgfile in files:
         basename = os.path.basename(imgfile)
         ext = os.path.splitext(basename)[1]
@@ -98,13 +108,13 @@ def main():
         hashcode = md5[:2]
         target_img = os.path.join(DESTDIR, hashcode, f"{md5}{ext}")
         target_json = os.path.join(DESTDIR, hashcode, f"{md5}.json")
-        symlink_force(imgfile, target_img)
+        link_force(imgfile, target_img, use_hardlink)
         if os.path.isfile(jsonfile):
-            symlink_force(jsonfile, target_json)
+            link_force(jsonfile, target_json, use_hardlink)
         txtfile = longbase + ".txt"
         if os.path.isfile(txtfile):
             target_txt = os.path.join(DESTDIR, hashcode, f"{md5}.txt")
-            symlink_force(txtfile, target_txt)
+            link_force(txtfile, target_txt, use_hardlink)
 
 if __name__ == "__main__":
     main()

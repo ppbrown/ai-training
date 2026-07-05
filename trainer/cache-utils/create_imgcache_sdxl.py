@@ -63,6 +63,12 @@ def parse_args():
     p.add_argument("--out_suffix", default=".img_sdxl", 
                    help="File suffix for saved latents(default: .img_sdxl)")
     p.add_argument(
+        "--previewonly",
+        action="store_true",
+        default=False,
+        help="Add a webp view of the cache data. Useful for quality checking.",
+    )
+    p.add_argument(
         "--writepreview",
         action="store_true",
         default=False,
@@ -144,6 +150,11 @@ def main():
     skipped = 0
     for path in all_image_paths:
         out_path = path.with_name(path.stem + args.out_suffix)
+        if args.previewonly:
+            preview_path = Path(str(out_path) + ".webp")
+            if preview_path.exists():
+                skipped += 1
+                continue
         if out_path.exists():
             skipped += 1
             continue
@@ -167,6 +178,9 @@ def main():
     # Load pipeline (for VAE)
     vae = _load_vae_fp32(args.model, args.vae)
 
+    if args.previewonly:
+        args.writepreview = True
+
     for i in tqdm(range(0, len(image_paths), args.batch_size)):
         batch_paths = image_paths[i:i+args.batch_size]
         batch_imgs = []
@@ -189,7 +203,8 @@ def main():
         # Save each latent as its own safetensors file
         for j, path in enumerate(valid_paths):
             out_path = path.with_name(path.stem + args.out_suffix)
-            st.save_file({"latent": latents[j]}, str(out_path))
+            if not args.previewonly:
+                st.save_file({"latent": latents[j]}, str(out_path))
             if args.writepreview:
                 pil_img = decode_latent_to_pil(vae, latents[j])
                 pil_img.save(str(out_path) + ".webp", format="WEBP", lossless=True, method=6)

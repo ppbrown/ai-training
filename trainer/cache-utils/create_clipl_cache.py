@@ -11,40 +11,53 @@ Behavior (no launcher required):
 - If only 1 GPU is visible, runs single-GPU.
 """
 
+
 import argparse
 import gc
-import os
 from pathlib import Path
 
-CACHE_POSTFIX = "_clipl"
+CACHE_POSTFIX_DEFAULT = "txt_clipl"
 
 
-def cli():
+def cli() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--data_root",
         required=True,
-        help="directory tree that contains *.txt caption files",
+        help="Directory tree that contains caption files",
     )
     p.add_argument(
         "--model",
         default="runwayml/stable-diffusion-v1-5",
-        help="HF repo / local dir of a SD1.5/2.1 pipeline (CLIP)",
+        help="HF repo / local dir of a SD1.5/2.1 pipeline (CLIP text encoder)",
     )
     p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--ext", default="txt", help="Extension of caption file (no dot). Default: txt")
+    p.add_argument(
+        "--postfix",
+        default=CACHE_POSTFIX_DEFAULT,
+        help=f"Cache extension to write (no dot). Default: {CACHE_POSTFIX_DEFAULT}",
+    )
     p.add_argument(
         "--overwrite",
         action="store_true",
-        help=f"re-encode even if *{CACHE_POSTFIX} already exists",
+        help="Re-encode even if cache already exists",
     )
     return p.parse_args()
 
 
-def build_file_list(root: Path, overwrite: bool) -> list[Path]:
-    txt_files = sorted(root.rglob("*.txt"))
+def _cache_path(caption_path: Path, postfix: str) -> Path:
+    postfix = postfix.lstrip(".")
+    # foo.txtqss -> foo.txt_clipl   (replace suffix, do NOT append)
+    return caption_path.with_suffix(f".{postfix}")
+
+
+def build_file_list(root: Path, ext: str, postfix: str, overwrite: bool) -> list[Path]:
+    ext = ext.lstrip(".")
+    txt_files = sorted(root.rglob(f"*.{ext}"))
 
     def needs_cache(p: Path) -> bool:
-        return overwrite or not (p.with_suffix(p.suffix + CACHE_POSTFIX)).exists()
+        return overwrite or not _cache_path(p, postfix).exists()
 
     return [p for p in txt_files if needs_cache(p)]
 
@@ -53,7 +66,7 @@ def _load_pipe_fp32(model_id: str, device: str):
     import torch
     from diffusers import StableDiffusionPipeline
 
-    # Enforce fp32 math (no TF32).
+    # Enforce fp32 math (no TF32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
@@ -77,7 +90,7 @@ def _load_pipe_fp32(model_id: str, device: str):
     return pipe
 
 
-def _encode_prompt_embeds_fp32(captions, pipe, device):
+def _encode_prompt_embeds_fp32(captions: list[str], pipe, device: str):
     import torch
 
     with torch.inference_mode():
@@ -91,7 +104,14 @@ def _encode_prompt_embeds_fp32(captions, pipe, device):
         return prompt_embeds.to(dtype=torch.float32).cpu()
 
 
-def worker(local_rank: int, world_size: int, files: list[str], model_id: str, batch_size: int):
+def worker(
+    local_rank: int,
+    world_size: int,
+    files: list[str],
+    model_id: str,
+    batch_size: int,
+    postfix: str,
+):
     import torch
     import safetensors.torch as st
 
@@ -113,18 +133,19 @@ def worker(local_rank: int, world_size: int, files: list[str], model_id: str, ba
         emb = _encode_prompt_embeds_fp32(captions, pipe, device)
 
         # emb is [B, T, C]; save per-sample
-        for path, vec in zip(batch_files, emb):
-            st.save_file({"emb": vec}, path.with_suffix(path.suffix + CACHE_POSTFIX))
+        for path, vec in zip(batch_files, emb, strict=True):
+            out_path = _cache_path(path, postfix)
+            st.save_file({"emb": vec.contiguous()}, out_path)
 
 
-def main():
+def main() -> None:
     args = cli()
 
     root = Path(args.data_root).expanduser().resolve()
     if not root.exists():
         raise SystemExit(f"data_root does not exist: {root}")
 
-    files = build_file_list(root, args.overwrite)
+    files = build_file_list(root, args.ext, args.postfix, args.overwrite)
     if not files:
         print("No captions to encode (nothing missing; use --overwrite to force).")
         return
@@ -137,18 +158,16 @@ def main():
     world_size = torch.cuda.device_count()
     print(f"Found {world_size} visible GPU(s). Encoding {len(files):,} caption(s).")
 
-    # Convert Paths to plain strings for safer multiprocessing pickling.
     file_strs = [str(p) for p in files]
 
     if world_size <= 1:
-        worker(0, 1, file_strs, args.model, args.batch_size)
+        worker(0, 1, file_strs, args.model, args.batch_size, args.postfix)
         print("All caches written.")
         return
 
-    # No torchrun. Pure python entrypoint.
     torch.multiprocessing.spawn(
         fn=worker,
-        args=(world_size, file_strs, args.model, args.batch_size),
+        args=(world_size, file_strs, args.model, args.batch_size, args.postfix),
         nprocs=world_size,
         join=True,
     )
@@ -156,6 +175,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure spawn start method behaves consistently.
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     main()

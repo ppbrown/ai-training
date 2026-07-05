@@ -1,157 +1,109 @@
 #!/usr/bin/env python3
 """
-Synthesize an EMA model of any averaging length from the power-EMA
-snapshots written during training (see --posthoc_ema in train_args.py).
+reconstruct_ph_ema.py
 
-Example:
-    python reconstruct_ph_ema.py \
-        --ph_ema_dir out/ph_ema \
-        --sigma_rel 0.07 \
-        --output_dir out/ema_sr0.07
+Materialize a full, loadable EMA VAE from a direct-save EMA snapshot
+(see train_posthoc_ema.py). Despite the historical name, there is no
+post-hoc least-squares reconstruction anymore: snapshots are online EMAs
+of the trainable params, saved fp32 as ema_t*_sr*.safetensors. This tool
+merges one such shadow onto a raw checkpoint (for frozen params, buffers,
+and config) and writes a standalone VAE dir.
 
-Sweep several lengths and compare with your validation tooling:
-    for sr in 0.02 0.05 0.08 0.12; do
-        python reconstruct_ph_ema.py --ph_ema_dir out/ph_ema \
-            --sigma_rel $sr --output_dir out/ema_sr$sr
-    done
+Same CLI as before:
 
-The reconstruction target step is --step if given, else the newest
-snapshot's step in --ph_ema_dir. --base_config is optional and defaults
-to <ph_ema_dir>/../step_NNNNNN for that target step (the raw checkpoint
-train_vae.py saves alongside each ph_ema snapshot batch). Pass
---base_config explicitly to borrow the architecture/frozen weights from
-a different checkpoint instead.
+    reconstruct_ph_ema.py --ph_ema_dir <out>/ph_ema \
+        --base <out>/step_084000 \
+        --sigma_rel 0.05 \
+        --output_dir step_084000_ema
 
-The solved snapshot coefficients are printed; negative values and
-values above 1 are normal and expected.
+--step is optional: pick the snapshot at that t (default: newest t present
+for the requested sigma_rel).
 """
 
-import argparse
 import re
+import argparse
 from pathlib import Path
 
-import numpy as np
 import torch
+import safetensors.torch as st
 from diffusers import AutoencoderKL
 
-from train_posthoc_ema import sigma_rel_to_gamma, solve_weights
 
-FNAME_RE = re.compile(r"ph_ema_t(\d+)_sr([0-9.]+)\.pt$")
+SNAP_RE = re.compile(r"ema_t(\d+)_sr([0-9.]+)\.safetensors$")
 
 
 def scan_snapshots(ph_ema_dir: Path):
-    """Return [(t, sigma_rel, path)] for every snapshot in the dir."""
+    """Return [(t, sigma_rel, path)] for every EMA snapshot in the dir."""
     snaps = []
-    for f in sorted(ph_ema_dir.glob("ph_ema_t*_sr*.pt")):
-        m = FNAME_RE.search(f.name)
+    for f in sorted(ph_ema_dir.glob("ema_t*_sr*.safetensors")):
+        m = SNAP_RE.search(f.name)
         if m:
             snaps.append((int(m.group(1)), float(m.group(2)), f))
     if not snaps:
-        raise SystemExit(f"No ph_ema_t*_sr*.pt snapshots found in {ph_ema_dir}")
+        raise SystemExit(f"No ema_t*_sr*.safetensors snapshots in {ph_ema_dir}")
     return snaps
 
 
-def reconstruct_state(ph_ema_dir: Path, sigma_rel: float, step: int = None,
-                       verbose: bool = True) -> dict:
-    """
-    Solve post-hoc EMA weights for sigma_rel from snapshots in ph_ema_dir.
-    Reconstructs at step if given, else at the newest snapshot's step.
-    Returns the combined state dict (param name -> fp32 tensor).
-    """
-    snaps = scan_snapshots(ph_ema_dir)
-    if step is not None:
-        snaps = [s for s in snaps if s[0] <= step]
-        if not snaps:
-            raise SystemExit(f"No snapshots with t <= {step} in {ph_ema_dir}")
-    t_i = np.array([s[0] for s in snaps], dtype=np.float64)
-    gamma_i = np.array([sigma_rel_to_gamma(s[1]) for s in snaps], dtype=np.float64)
-    t_r = float(step) if step is not None else t_i.max()
-    gamma_r = sigma_rel_to_gamma(sigma_rel)
-
-    x = solve_weights(t_i, gamma_i, t_r, gamma_r)
-    if verbose:
-        print(f"Reconstructing sigma_rel={sigma_rel} at t={int(t_r)}"
-              f" from {len(snaps)} snapshots:")
-        for (t, sr, f), w in zip(snaps, x):
-            print(f"  {f.name}: {w:+.5f}")
-
-    combined = None
-    for (t, sr, f), w in zip(snaps, x):
-        data = torch.load(f, map_location="cpu")
-        assert data["t"] == t and abs(data["sigma_rel"] - sr) < 1e-6, \
-            f"metadata mismatch in {f.name}"
-        state = data["state"]
-        if combined is None:
-            combined = {n: v.float() * w for n, v in state.items()}
-        else:
-            for n, v in state.items():
-                combined[n] += v.float() * w
-        del data, state
-    return combined
+def pick_snapshot(ph_ema_dir: Path, sigma_rel: float, step: int | None) -> Path:
+    """Snapshot for sigma_rel at t==step, or newest t if step is None."""
+    cands = [(t, f) for t, sr, f in scan_snapshots(ph_ema_dir)
+             if abs(sr - sigma_rel) < 1e-6]
+    if not cands:
+        raise SystemExit(f"No snapshots with sigma_rel={sigma_rel:.4f} in {ph_ema_dir}")
+    if step is None:
+        return max(cands, key=lambda c: c[0])[1]
+    for t, f in cands:
+        if t == step:
+            return f
+    raise SystemExit(
+        f"No sigma_rel={sigma_rel:.4f} snapshot at step {step}; "
+        f"available: {sorted(t for t, _ in cands)}")
 
 
-def load_autoencoder(base_config, device="cpu", dtype=torch.float32) -> AutoencoderKL:
-    """Load a VAE for its config/architecture, e.g. to receive a reconstructed state dict."""
+def load_ema_vae(base: Path, ema_file: Path, dtype=torch.float32) -> AutoencoderKL:
+    """Raw checkpoint's frozen params + buffers + config, with trainable
+    params overwritten by the EMA shadow."""
     try:
-        vae = AutoencoderKL.from_pretrained(str(base_config), torch_dtype=dtype)
+        vae = AutoencoderKL.from_pretrained(str(base), torch_dtype=dtype)
     except EnvironmentError:
-        vae = AutoencoderKL.from_pretrained(
-            str(base_config), subfolder="vae", torch_dtype=dtype)
-    return vae.to(device)
+        vae = AutoencoderKL.from_pretrained(str(base), subfolder="vae", torch_dtype=dtype)
 
-
-def apply_state(vae: AutoencoderKL, combined: dict) -> None:
-    """Copy a reconstructed state dict into vae's matching named parameters in-place."""
-    device = next(vae.parameters()).device
-    param_names = {n for n, _ in vae.named_parameters()}
-    unmatched = [n for n in combined if n not in param_names]
-    if unmatched:
+    ema = st.load_file(str(ema_file))
+    model_params = dict(vae.named_parameters())
+    missing = [k for k in ema if k not in model_params]
+    if missing:
         raise SystemExit(
-            f"{len(unmatched)} snapshot params not found in base model,"
-            f" e.g. {unmatched[0]} - wrong --base_config?")
+            f"{len(missing)} EMA param(s) absent from --base model, e.g. "
+            f"{missing[0]} -- wrong --base for this snapshot?")
     with torch.no_grad():
         for n, p in vae.named_parameters():
-            if n in combined:
-                p.copy_(combined[n].to(device))
+            if n in ema:
+                p.copy_(ema[n].to(dtype=p.dtype))
+    return vae
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Reconstruct a post-hoc EMA VAE from power-EMA snapshots.")
-    ap.add_argument("--ph_ema_dir", default="ph_ema",
-                    help="Directory of ph_ema_*.pt snapshots from train_vae.py")
-    ap.add_argument("-b", "--base_config", default=None,
-                    help="Saved checkpoint dir this reconstruction borrows its"
-                         " model config/architecture (and any non-EMA'd frozen"
-                         " weights) from. Defaults to <ph_ema_dir>/../step_NNNNNN"
-                         " for the target step being reconstructed (see --step)."
-                         " Override to borrow architecture/frozen weights from a"
-                         " different checkpoint instead.")
-    ap.add_argument("-s","--sigma_rel", type=float, required=True,
-                    help="Target averaging length. Try sweeping 0.02 - 0.15.")
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--ph_ema_dir", required=True,
+                    help="Directory of ema_t*_sr*.safetensors snapshots"
+                         " (<train output_dir>/ph_ema)")
+    ap.add_argument("--base", required=True,
+                    help="Raw step_NNNNNN/ checkpoint supplying config, buffers,"
+                         " and any frozen (non-EMA'd) weights.")
+    ap.add_argument("--sigma_rel", type=float, required=True,
+                    help="Which saved EMA anchor to materialize.")
     ap.add_argument("--step", type=int, default=None,
-                    help="Only use snapshots with t <= this step, and"
-                         " reconstruct at this step instead of the newest"
-                         " snapshot's step. Use this to reconstruct as of an"
-                         " earlier point in training.")
-    ap.add_argument("-o","--output_dir", default=None,
-                    help="Where to save the reconstructed VAE."
-                         " Defaults to <base_config>_ema, e.g."
-                         " step_NNNNNN_ema.")
+                    help="Snapshot step t to use. Default: newest available.")
+    ap.add_argument("--output_dir", required=True)
     args = ap.parse_args()
 
-    ph_ema_dir = Path(args.ph_ema_dir)
-    if args.base_config:
-        base_config = Path(args.base_config)
-    else:
-        t_r = args.step if args.step is not None else max(t for t, _, _ in scan_snapshots(ph_ema_dir))
-        base_config = ph_ema_dir.parent / f"step_{t_r:06d}"
+    ema_file = pick_snapshot(Path(args.ph_ema_dir), args.sigma_rel, args.step)
+    print(f"Merging {ema_file.name} onto {args.base}")
 
-    combined = reconstruct_state(ph_ema_dir, args.sigma_rel, args.step)
-    vae = load_autoencoder(base_config)
-    apply_state(vae, combined)
+    vae = load_ema_vae(Path(args.base), ema_file)
 
-    out = Path(args.output_dir) if args.output_dir else Path(f"{base_config}_ema")
+    out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     vae.save_pretrained(str(out))
     print(f"Saved: {out}")
