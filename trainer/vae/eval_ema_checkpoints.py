@@ -3,27 +3,28 @@
 Compare raw checkpoints against online EMA snapshots across a 2D grid of
 (step, sigma_rel), on a single test image.
 
-This is the DIRECT-SAVE variant, paired with the rewritten
-train_posthoc_ema.py. There is no post-hoc least-squares reconstruction:
-each EMA snapshot is a full-precision online EMA of the trainable params
-for one sigma_rel, saved as ema_t*_sr*.safetensors. Scoring merges that
-shadow onto the step's raw checkpoint (for frozen params + buffers +
-config) and evaluates the resulting VAE.
+Matches the DIRECT-SAVE EMA scheme in train_ema.py / train_vae.py: at each
+checkpoint, train_vae.py swaps in each sigma_rel's EMA shadow and calls
+vae.save_pretrained() directly, so every step_NNNNNN/ema/sr<SIGMA_REL>/ dir
+is already a complete, standalone VAE checkpoint -- no post-hoc merging
+onto a raw checkpoint is needed.
 
 For each step, reports L1 / LPIPS(vgg) / PSNR / SSIM against the original
 test image for:
   - the raw (non-EMA) checkpoint at that step
   - each requested sigma_rel's EMA snapshot at that step
 
-Both axes self-adjust from what's actually in ph_ema/ unless overridden:
+Both axes self-adjust from what's actually on disk unless overridden:
   - --step is optional. Without it, the sweep covers the last --step_sweep
-    snapshot steps. With it, --step_sweep entries centered on that step's
-    position in the available list, clamped to range.
-  - --sigma_rels defaults to every sigma_rel anchor actually saved in
-    ph_ema/. Only saved anchors are scorable (no interpolation).
+    step_NNNNNN/ dirs found under --output_dir. With it, --step_sweep
+    entries centered on that step's position in the available list,
+    clamped to range.
+  - --sigma_rels defaults to every sigma_rel anchor actually saved (i.e.
+    every step_NNNNNN/ema/sr*/ dir) among the swept steps. Only saved
+    anchors are scorable (no interpolation).
 
-Run from inside the training --output_dir (contains step_NNNNNN/ dirs and
-ph_ema/):
+Run from inside the training --output_dir (contains step_NNNNNN/ dirs,
+each with its own ema/sr*/ subdirs):
 
     python eval_ema_checkpoints.py --test_img /data/test/sample.jpg
 
@@ -31,7 +32,7 @@ Center the --step_sweep window (default 5) on a specific step:
 
     python eval_ema_checkpoints.py --step 150000 --test_img /data/test/sample.jpg
 
-Dump a scored EMA model to disk (self-verifying: re-scores the saved dir
+Dump a scored EMA snapshot to disk (self-verifying: re-scores the copy
 and asserts it matches the row) for use as a training seed:
 
     python eval_ema_checkpoints.py --step 84000 --sigma_rels 0.05 \
@@ -42,50 +43,61 @@ Test image is always evaluated at 512x512.
 
 import argparse
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import safetensors.torch as st
 
 from train_datatools import load_image_tensor
-from train_posthoc_ema import load_ema_vae
 from compare_loss import load_vgg
 
 
-SNAP_RE = re.compile(r"ema_t(\d+)_sr([0-9.]+)\.safetensors$")
+STEP_DIR_RE = re.compile(r"step_(\d+)$")
+SR_DIR_RE = re.compile(r"sr([0-9.]+)$")
 
 
-def scan_snapshots(ph_ema_dir: Path):
-    """Return [(t, sigma_rel, path)] for every EMA snapshot in the dir."""
-    snaps = []
-    for f in sorted(ph_ema_dir.glob("ema_t*_sr*.safetensors")):
-        m = SNAP_RE.search(f.name)
-        if m:
-            snaps.append((int(m.group(1)), float(m.group(2)), f))
-    if not snaps:
-        raise SystemExit(f"No ema_t*_sr*.safetensors snapshots in {ph_ema_dir}")
-    return snaps
+def available_steps(out_dir: Path) -> list:
+    """Every step with a step_NNNNNN/ raw checkpoint dir, sorted ascending."""
+    steps = []
+    for d in out_dir.iterdir():
+        if d.is_dir():
+            m = STEP_DIR_RE.fullmatch(d.name)
+            if m:
+                steps.append(int(m.group(1)))
+    if not steps:
+        raise SystemExit(f"No step_NNNNNN/ checkpoints in {out_dir}")
+    return sorted(steps)
 
 
-def available_steps(ph_ema_dir: Path) -> list:
-    """Every distinct step with an EMA snapshot, sorted ascending."""
-    return sorted({t for t, _, _ in scan_snapshots(ph_ema_dir)})
+def ema_root(out_dir: Path, step: int) -> Path:
+    return out_dir / f"step_{step:06d}" / "ema"
 
 
-def available_sigma_rels(ph_ema_dir: Path) -> list:
-    """Every distinct sigma_rel anchor saved, sorted ascending."""
-    return sorted({sr for _, sr, _ in scan_snapshots(ph_ema_dir)})
+def available_sigma_rels(out_dir: Path, steps: list) -> list:
+    """Every distinct sigma_rel anchor saved under any of `steps`' ema/ dirs."""
+    srs = set()
+    for step in steps:
+        root = ema_root(out_dir, step)
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            m = SR_DIR_RE.fullmatch(d.name)
+            if m:
+                srs.add(float(m.group(1)))
+    if not srs:
+        raise SystemExit(f"No sr*/ EMA dirs found under steps {steps}")
+    return sorted(srs)
 
 
-def snapshot_for(ph_ema_dir: Path, step: int, sigma_rel: float) -> Path:
-    """Exact snapshot file for (step, sigma_rel), or SystemExit."""
-    for t, sr, f in scan_snapshots(ph_ema_dir):
-        if t == step and abs(sr - sigma_rel) < 1e-6:
-            return f
-    raise SystemExit(
-        f"No EMA snapshot for step={step} sigma_rel={sigma_rel:.4f} in {ph_ema_dir}")
+def ema_dir_for(out_dir: Path, step: int, sigma_rel: float) -> Path:
+    """Exact EMA snapshot dir for (step, sigma_rel), or SystemExit."""
+    d = ema_root(out_dir, step) / f"sr{sigma_rel:.4f}"
+    if not d.is_dir():
+        raise SystemExit(
+            f"No EMA dir for step={step} sigma_rel={sigma_rel:.4f}: {d}")
+    return d
 
 
 def step_window(available: list, step: int = None, width: int = 5) -> list:
@@ -97,15 +109,16 @@ def step_window(available: list, step: int = None, width: int = 5) -> list:
     if step is None:
         return available[-width:]
     if step not in available:
-        raise SystemExit(f"No EMA snapshot at step {step}; available: {available}")
+        raise SystemExit(f"No checkpoint at step {step}; available: {available}")
     idx = available.index(step)
     w = min(width, n)
     start = max(0, min(idx - width // 2, n - w))
     return available[start:start + w]
 
 
-def load_raw_vae(ckpt_dir: Path, device, dtype=torch.float32):
-    """Load a raw step checkpoint as a VAE (config + full weights)."""
+def load_vae_dir(ckpt_dir: Path, device, dtype=torch.float32):
+    """Load a complete saved VAE dir -- either a step_NNNNNN/ raw checkpoint
+    or a step_NNNNNN/ema/sr*/ standalone EMA snapshot -- config + full weights."""
     from diffusers import AutoencoderKL
     try:
         vae = AutoencoderKL.from_pretrained(str(ckpt_dir), torch_dtype=dtype)
@@ -195,39 +208,37 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--output_dir", default=".",
-                    help="train_vae.py's --output_dir (contains step_NNNNNN/ and ph_ema/)."
+                    help="train_vae.py's --output_dir (contains step_NNNNNN/"
+                         " dirs, each with its own ema/sr*/ subdirs)."
                          " Defaults to the current directory.")
     ap.add_argument("--step", type=int, default=None,
                     help="Center step for a sweep (that step plus step_sweep//2"
                          " available steps before/after, clamped to disk). Must"
-                         " match a step with an EMA snapshot. Defaults to the"
-                         " last step_sweep available steps.")
+                         " be a step_NNNNNN/ checkpoint on disk. Defaults to"
+                         " the last step_sweep available steps.")
     ap.add_argument("--step_sweep", type=int, default=5,
                     help="Width of the step window: this many steps total,"
                          " centered on --step (or most recent if omitted).")
     ap.add_argument("--test_img", default="/data/models/sampleimg-full-hf-512.png")
     ap.add_argument("--sigma_rels", type=float, nargs="+", default=None,
                     help="EMA sigma_rel anchors to evaluate at each step."
-                         " Must match saved snapshot anchors (no interpolation)."
-                         " Defaults to every anchor saved in ph_ema/.")
-    ap.add_argument("--base_config", default=None,
-                    help="Architecture / frozen-weight source for EMA merges."
-                         " Defaults to each step's own raw checkpoint.")
+                         " Must match saved step_NNNNNN/ema/sr*/ dirs (no"
+                         " interpolation). Defaults to every anchor saved"
+                         " among the swept steps.")
     ap.add_argument("--dump", default=None,
                     help="If set with a single --step and single --sigma_rels,"
-                         " save the scored EMA VAE to this dir, then re-score the"
-                         " saved model and assert it reproduces the row.")
+                         " copy that step's EMA snapshot dir to this path, then"
+                         " re-score the copy and assert it reproduces the row.")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.output_dir)
-    ph_ema_dir = out_dir / "ph_ema"
 
-    steps = step_window(available_steps(ph_ema_dir), args.step, width=args.step_sweep)
+    steps = step_window(available_steps(out_dir), args.step, width=args.step_sweep)
     if args.sigma_rels is not None:
         sigma_rels = args.sigma_rels
     else:
-        sigma_rels = available_sigma_rels(ph_ema_dir)
+        sigma_rels = available_sigma_rels(out_dir, steps)
     print(f"steps: {steps}")
     print(f"sigma_rels: {sigma_rels}")
 
@@ -247,27 +258,27 @@ def main():
         ckpt_dir = out_dir / f"step_{step:06d}"
         if not ckpt_dir.is_dir():
             raise SystemExit(f"No checkpoint at {ckpt_dir}")
-        base_dir = Path(args.base_config) if args.base_config else ckpt_dir
 
         print(f"[step {step}] [raw] {ckpt_dir}")
-        vae = load_raw_vae(ckpt_dir, device)
+        vae = load_vae_dir(ckpt_dir, device)
         rows.append((step, "raw", evaluate(vae, x, lpips_fn)))
         del vae
 
         for sr in sigma_rels:
-            snap = snapshot_for(ph_ema_dir, step, sr)
-            print(f"[step {step}] [ema sigma_rel={sr}] {snap.name} <- {base_dir}")
-            vae = load_ema_vae(base_dir, snap, device=device)
+            snap_dir = ema_dir_for(out_dir, step, sr)
+            print(f"[step {step}] [ema sigma_rel={sr}] {snap_dir}")
+            vae = load_vae_dir(snap_dir, device)
             metrics = evaluate(vae, x, lpips_fn)
             rows.append((step, f"sr{sr}", metrics))
 
             if args.dump is not None:
                 dump_dir = Path(args.dump)
-                dump_dir.mkdir(parents=True, exist_ok=True)
-                vae.save_pretrained(str(dump_dir))
-                print(f"[dump] saved {dump_dir}; verifying round-trip...")
+                if dump_dir.exists():
+                    raise SystemExit(f"--dump target already exists: {dump_dir}")
+                shutil.copytree(snap_dir, dump_dir)
+                print(f"[dump] copied {snap_dir} -> {dump_dir}; verifying round-trip...")
                 del vae
-                check = load_raw_vae(dump_dir, device)
+                check = load_vae_dir(dump_dir, device)
                 cm = evaluate(check, x, lpips_fn)
                 del check
                 for k in ("l1", "lpips", "psnr", "ssim"):
