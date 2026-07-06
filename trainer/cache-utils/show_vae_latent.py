@@ -18,6 +18,7 @@ Usage:
 
 """
 
+from __future__ import annotations
 
 import sys
 import argparse
@@ -28,8 +29,11 @@ import safetensors.torch as st
 from diffusers import DiffusionPipeline, AutoencoderKL
 from torchvision.transforms.functional import to_pil_image
 
-import tkinter as tk
-from PIL import ImageTk
+if __name__ == "__main__":
+    # Only needed for the interactive Viewer; guarded so importing this
+    # module (e.g. for decode_latent_to_pil) doesn't require tkinter.
+    import tkinter as tk
+    from PIL import ImageTk
 
 
 # ---- config ----
