@@ -703,18 +703,20 @@ def main() -> None:
             if ema is not None:
                 for idx, sr in enumerate(ema.sigma_rels):
                     ema.apply_to(vae, idx)
-                    ema_dir = ckpt_dir / "ema" / f"sr{sr:.4f}"
-                    vae.save_pretrained(str(ema_dir))
-                    print(f"Saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
-                    if sample_img_path is not None:
-                        write_vae_sample_webp(
-                            vae_model=vae,
-                            sample_img=sample_img_path,
-                            target_w=sample_tw,
-                            target_h=sample_th,
-                            out_path=ema_dir / "vae_sample.webp",
-                        )
-                    ema.restore(vae)
+                    try:
+                        ema_dir = ckpt_dir / "ema" / f"sr{sr:.4f}"
+                        vae.save_pretrained(str(ema_dir))
+                        print(f"Saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
+                        if sample_img_path is not None:
+                            write_vae_sample_webp(
+                                vae_model=vae,
+                                sample_img=sample_img_path,
+                                target_w=sample_tw,
+                                target_h=sample_th,
+                                out_path=ema_dir / "vae_sample.webp",
+                            )
+                    finally:
+                        ema.restore(vae)
 
     # Final save
     final_dir = out_dir / "final"
@@ -734,18 +736,20 @@ def main() -> None:
     if ema is not None:
         for idx, sr in enumerate(ema.sigma_rels):
             ema.apply_to(vae, idx)
-            ema_dir = final_dir / "ema" / f"sr{sr:.4f}"
-            vae.save_pretrained(str(ema_dir))
-            print(f"saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
-            if sample_img_path is not None:
-                write_vae_sample_webp(
-                    vae_model=vae,
-                    sample_img=sample_img_path,
-                    target_w=sample_tw,
-                    target_h=sample_th,
-                    out_path=ema_dir / "vae_sample.webp",
-                )
-            ema.restore(vae)
+            try:
+                ema_dir = final_dir / "ema" / f"sr{sr:.4f}"
+                vae.save_pretrained(str(ema_dir))
+                print(f"saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
+                if sample_img_path is not None:
+                    write_vae_sample_webp(
+                        vae_model=vae,
+                        sample_img=sample_img_path,
+                        target_w=sample_tw,
+                        target_h=sample_th,
+                        out_path=ema_dir / "vae_sample.webp",
+                    )
+            finally:
+                ema.restore(vae)
 
 
 if __name__ == "__main__":

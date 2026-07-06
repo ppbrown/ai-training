@@ -318,14 +318,15 @@ def write_vae_sample_webp(
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
-    enc = vae_model.encode(x)
-    latents = enc.latent_dist.mean
-    dec = vae_model.decode(latents).sample
-
-    torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
-    torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
-    if was_training:
-        vae_model.train()
+    try:
+        enc = vae_model.encode(x)
+        latents = enc.latent_dist.mean
+        dec = vae_model.decode(latents).sample
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
+        torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
+        if was_training:
+            vae_model.train()
 
     dec_01 = (dec[0] / 2.0 + 0.5).clamp(0.0, 1.0).detach().cpu()
     pil = tensor_to_pil_rgb(dec_01)
