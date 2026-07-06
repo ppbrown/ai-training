@@ -44,14 +44,19 @@ Test image is always evaluated at 512x512.
 import argparse
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torchvision.transforms.functional import to_tensor
 
 from train_datatools import load_image_tensor
 from compare_loss import load_vgg
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cache-utils"))
+from show_vae_latent import decode_latent_to_pil
 
 
 STEP_DIR_RE = re.compile(r"step_(\d+)$")
@@ -165,17 +170,13 @@ def psnr(a: torch.Tensor, b: torch.Tensor) -> float:
     return 10.0 * np.log10(1.0 / mse)
 
 
-def quantize_delivered(x_01: torch.Tensor) -> torch.Tensor:
-    """Round-trip through uint8 quantization, matching the actual delivered
-    image (see tensor_to_pil_rgb in train_datatools.py) instead of scoring
-    the raw float32 decoder output nobody will ever actually see."""
-    return (x_01.clamp(0.0, 1.0) * 255.0).round() / 255.0
-
-
 @torch.no_grad()
 def evaluate(vae, x_pm1: torch.Tensor, lpips_fn) -> dict:
-    """x_pm1: (1, 3, H, W) in [-1, 1]. Runs encode/decode, quantizes the
-    decode to uint8 (the actual delivered image), scores against x_pm1."""
+    """x_pm1: (1, 3, H, W) in [-1, 1]. Runs encode/decode via
+    show_vae_latent.decode_latent_to_pil (the same decode path the
+    standalone cache-viewing tool uses), so scoring matches what that
+    tool actually shows/writes, then scores the quantized result against
+    x_pm1."""
     was_training = vae.training
     vae.eval()
 
@@ -186,16 +187,17 @@ def evaluate(vae, x_pm1: torch.Tensor, lpips_fn) -> dict:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
-    dec = vae.decode(vae.encode(x_pm1).latent_dist.mean).sample
+    latent = vae.encode(x_pm1).latent_dist.mean.squeeze(0)
+    pil_img = decode_latent_to_pil(vae, latent)
 
     torch.backends.cuda.matmul.allow_tf32 = prev_matmul_tf32
     torch.backends.cudnn.allow_tf32 = prev_cudnn_tf32
     if was_training:
         vae.train()
 
-    x_01 = (x_pm1 / 2 + 0.5).clamp(0, 1)
-    dec_01 = quantize_delivered(dec / 2 + 0.5)
+    dec_01 = to_tensor(pil_img).unsqueeze(0).to(x_pm1.device, dtype=x_pm1.dtype)
     dec_pm1 = dec_01 * 2 - 1
+    x_01 = (x_pm1 / 2 + 0.5).clamp(0, 1)
     return {
         "l1": F.l1_loss(dec_01, x_01).item(),
         "lpips": lpips_fn(dec_pm1, x_pm1).mean().item(),
