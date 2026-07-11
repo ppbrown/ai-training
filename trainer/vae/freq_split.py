@@ -144,9 +144,11 @@ def _preserve_hf_band(hf_signed: np.ndarray, orig: np.ndarray, threshold: float,
     return out
 
 
-def save_band(arr: np.ndarray, out_path: Path) -> None:
+def save_band(arr: np.ndarray, out_path: Path, resize_to: int | None = None) -> None:
     clipped = np.clip(arr, 0.0, 1.0)
     img = Image.fromarray((clipped * 255).astype(np.uint8))
+    if resize_to:
+        img = img.resize((resize_to, resize_to), Image.LANCZOS)
     #img.save(out_path.with_suffix(".png"), compress_level=9)
     #img.save(out_path.with_suffix(args.suffix))
     #img.save(out_path.with_suffix(".jpg", quality=95, subsampling=0))
@@ -220,6 +222,85 @@ def _worker(args: tuple) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# CLI helpers (shared with freq_split_hf.py)
+# ---------------------------------------------------------------------------
+
+def add_resize_arg(parser: argparse.ArgumentParser) -> None:
+    resize_group = parser.add_mutually_exclusive_group()
+    resize_group.add_argument("--1024", dest="resize_target", action="store_const", const=1024,
+                              help="Downscale so shortest side is 1024px before splitting (never upscales)")
+    resize_group.add_argument("--512", dest="resize_target", action="store_const", const=512,
+                              help="Downscale so shortest side is 512px before splitting (never upscales)")
+
+
+def add_preserve_hf_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--preserve_hf", action="store_true",
+                        help="YOU PROBABLY WANT TO USE THIS. "
+                        "Write original pixel values at active HF locations instead of "
+                        "clipping the signed residual; inactive (near-zero) pixels become black. "
+                        "Applies only to the top HF band (hf in 2-band, hf3 in 4-band).")
+    parser.add_argument("--use_hf_abs", action="store_true",
+                        help="Use abs() when computing the HF activity mask in --preserve_hf "
+                             "(catches negative as well as positive residuals); default is positive-only")
+    parser.add_argument("--preserve_hf_threshold", type=float, default=DEFAULT_PRESERVE_HF_THRESHOLD,
+                        help=f"Signed HF per-pixel max above which a pixel is considered active "
+                             f"for --preserve_hf (default: {DEFAULT_PRESERVE_HF_THRESHOLD})")
+
+
+def add_analyze_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--analyze", action="store_true",
+                        help="Report soft/blurry images without writing any files")
+    parser.add_argument("--analyze_sigma", type=float, default=DEFAULT_ANALYZE_SIGMA,
+                        help=f"HF sigma for sharpness measurement in pixels (default: {DEFAULT_ANALYZE_SIGMA})")
+    parser.add_argument("--analyze_threshold", type=float, default=DEFAULT_ANALYZE_THRESHOLD,
+                        help=f"Minimum RMS sharpness score to pass (default: {DEFAULT_ANALYZE_THRESHOLD})")
+
+
+def collect_images(input_dir: Path, preview: bool = False) -> list[Path]:
+    """Recursively collect supported image files, sorted for determinism."""
+    images = sorted([
+        p for p in input_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in EXTENSIONS
+    ])
+    if preview:
+        images = images[:5]
+    return images
+
+
+def run_analyze(images: list[Path], sigma: float, threshold: float, workers: int) -> None:
+    """Measure HF sharpness for each image and report soft/unreadable ones."""
+    awork = [(p, sigma) for p in images]
+    soft: list[tuple[str, float]] = []
+    read_errors: list[str] = []
+    with mp.Pool(workers) as pool:
+        for path, score in tqdm(pool.imap_unordered(_analyze_worker, awork), total=len(awork)):
+            if score < 0:
+                read_errors.append(path)
+            elif score < threshold:
+                soft.append((path, score))
+    if read_errors:
+        print(f"{len(read_errors)} file(s) could not be read:", file=sys.stderr)
+        for p in sorted(read_errors):
+            print(f"  {p}", file=sys.stderr)
+    for path, score in sorted(soft):
+        print(path)
+    print(
+        f"{len(soft)}/{len(images)} failed (sigma={sigma}, threshold={threshold})",
+        file=sys.stderr,
+    )
+
+
+def run_split(work: list[tuple], workers: int, worker_fn=_worker) -> list[str]:
+    """Run the worker pool over `work`, returning a list of error strings."""
+    errors = []
+    with mp.Pool(workers) as pool:
+        for err in tqdm(pool.imap_unordered(worker_fn, work), total=len(work)):
+            if err:
+                errors.append(err)
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -230,11 +311,7 @@ def main() -> None:
     parser.add_argument("--input", "-i", required=True, type=Path,
                         help="Directory of source images")
     parser.add_argument("--suffix", default=".png")
-    resize_group = parser.add_mutually_exclusive_group()
-    resize_group.add_argument("--1024", dest="resize_target", action="store_const", const=1024,
-                              help="Downscale so shortest side is 1024px before splitting (never upscales)")
-    resize_group.add_argument("--512", dest="resize_target", action="store_const", const=512,
-                              help="Downscale so shortest side is 512px before splitting (never upscales)")
+    add_resize_arg(parser)
 
     # 2-band mode
     parser.add_argument("--out_lf", type=Path,
@@ -256,25 +333,10 @@ def main() -> None:
 
     parser.add_argument("--workers", type=int, default=max(1, mp.cpu_count() - 1),
                         help="Parallel worker count (default: cpu count - 1)")
-    parser.add_argument("--preserve_hf", action="store_true",
-                        help="YOU PROBABLY WANT TO USE THIS. "
-                        "Write original pixel values at active HF locations instead of "
-                        "clipping the signed residual; inactive (near-zero) pixels become black. "
-                        "Applies only to the top HF band (hf in 2-band, hf3 in 4-band).")
-    parser.add_argument("--use_hf_abs", action="store_true",
-                        help="Use abs() when computing the HF activity mask in --preserve_hf "
-                             "(catches negative as well as positive residuals); default is positive-only")
-    parser.add_argument("--preserve_hf_threshold", type=float, default=DEFAULT_PRESERVE_HF_THRESHOLD,
-                        help=f"Signed HF per-pixel max above which a pixel is considered active "
-                             f"for --preserve_hf (default: {DEFAULT_PRESERVE_HF_THRESHOLD})")
+    add_preserve_hf_args(parser)
     parser.add_argument("--preview", action="store_true",
                         help="Process first 5 images only, for visual inspection")
-    parser.add_argument("--analyze", action="store_true",
-                        help="Report soft/blurry images without writing any files")
-    parser.add_argument("--analyze_sigma", type=float, default=DEFAULT_ANALYZE_SIGMA,
-                        help=f"HF sigma for sharpness measurement in pixels (default: {DEFAULT_ANALYZE_SIGMA})")
-    parser.add_argument("--analyze_threshold", type=float, default=DEFAULT_ANALYZE_THRESHOLD,
-                        help=f"Minimum RMS sharpness score to pass (default: {DEFAULT_ANALYZE_THRESHOLD})")
+    add_analyze_args(parser)
     args = parser.parse_args()
 
     # Validate input
@@ -319,16 +381,12 @@ def main() -> None:
         sys.exit(1)
 
     # Collect images
-    images = sorted([
-        p for p in args.input.rglob("*")
-        if p.is_file() and p.suffix.lower() in EXTENSIONS
-    ])
+    images = collect_images(args.input, preview=args.preview)
     if not images:
         print(f"ERROR: no images found in {args.input}", file=sys.stderr)
         sys.exit(1)
 
     if args.preview:
-        images = images[:5]
         print(f"Preview mode: processing {len(images)} images")
 
     # Print config — all to stderr in analyze mode so stdout stays pipeline-clean
@@ -353,28 +411,7 @@ def main() -> None:
     print(file=info)
 
     if args.analyze:
-        awork = [(p, args.analyze_sigma) for p in images]
-        soft: list[tuple[str, float]] = []
-        read_errors: list[str] = []
-        with mp.Pool(args.workers) as pool:
-            for path, score in tqdm(
-                pool.imap_unordered(_analyze_worker, awork), total=len(awork)
-            ):
-                if score < 0:
-                    read_errors.append(path)
-                elif score < args.analyze_threshold:
-                    soft.append((path, score))
-        if read_errors:
-            print(f"{len(read_errors)} file(s) could not be read:", file=sys.stderr)
-            for p in sorted(read_errors):
-                print(f"  {p}", file=sys.stderr)
-        for path, score in sorted(soft):
-            print(path)
-        print(
-            f"{len(soft)}/{len(images)} failed "
-            f"(sigma={args.analyze_sigma}, threshold={args.analyze_threshold})",
-            file=sys.stderr,
-        )
+        run_analyze(images, args.analyze_sigma, args.analyze_threshold, args.workers)
         return
 
     work = [
@@ -382,11 +419,7 @@ def main() -> None:
         for p in images
     ]
 
-    errors = []
-    with mp.Pool(args.workers) as pool:
-        for err in tqdm(pool.imap_unordered(_worker, work), total=len(work)):
-            if err:
-                errors.append(err)
+    errors = run_split(work, args.workers)
 
     if errors:
         print(f"\n{len(errors)} errors:")
