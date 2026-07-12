@@ -2,6 +2,8 @@
 
 # Encode, and then DECODE an image,
 # to make sure that the vae is not buggy
+# Default is to display result on screen.
+# use --out to write to a specific file
 
 # fyi: uses "tempfile"
 
@@ -14,9 +16,11 @@ parser.add_argument("--model",
                       default="/BLUE/t5-train/models/sd-base")
 parser.add_argument("--vae", help="VAE model directory or repo (VAE only)")
 
-parser.add_argument("--imgfile", required=True, help="Path to an image file")
+parser.add_argument("-i", "--imgfile", required=True, help="Path to an image file. Use square image.")
+parser.add_argument("-o", "--out", help="Optional output image file")
 parser.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
-parser.add_argument("--res", type=int, default=512,help="Length of res square. Default=512")
+parser.add_argument("--cpu", action="store_true",help="Force use of CPU")
+parser.add_argument("--res", type=int, default=512,help="Length of target resize square. Default=512")
 
 args = parser.parse_args()
 
@@ -34,8 +38,12 @@ from vae_auto_loader import load_vae_auto
 from PIL import Image
 
 # Check if CUDA is available and set the device accordingly
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#device = "cpu"
+
+if args.cpu:
+    device = "cpu"
+    print("Forcing device=CPU")
+else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from typing import Any, Tuple
 
@@ -69,7 +77,7 @@ input_tensor = transform(input_image).unsqueeze(0).to(device)
 
 # Encode the image
 with torch.no_grad():
-    encoded = vae_model.encode(input_tensor).latent_dist.sample()
+    encoded = vae_model.encode(input_tensor).latent_dist.mean
 
     print("Latent shape",encoded.shape)
     st.save_file({"latent": encoded}, "tempfile")
@@ -83,4 +91,7 @@ decoded_image = decoded_image.squeeze(0).cpu()
 from torchvision.transforms.functional import to_pil_image
 
 pil_image = to_pil_image(decoded_image)
-pil_image.show()
+if args.out:
+    pil_image.save(args.out, lossless=True)
+else:
+    pil_image.show()
