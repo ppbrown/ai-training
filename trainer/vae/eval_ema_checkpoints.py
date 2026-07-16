@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/data/venv/bin/python3
 """
 Compare raw checkpoints against online EMA snapshots across a 2D grid of
 (step, sigma_rel), on a single test image.
@@ -241,7 +241,8 @@ def main():
         sigma_rels = args.sigma_rels
     else:
         sigma_rels = available_sigma_rels(out_dir, steps)
-    print(f"steps: {steps}")
+    print("Using test image of", args.test_img)
+    print(f"target steps: {steps}")
     print(f"sigma_rels: {sigma_rels}")
 
     if args.dump is not None and not (len(steps) == 1 and len(sigma_rels) == 1):
@@ -293,6 +294,7 @@ def main():
                 del vae
 
     print()
+    # yes say this twice
     print("Using test image of", args.test_img)
     header = f"{'step':>8} {'candidate':<12} {'l1':>8} {'lpips(vgg)':>10} {'psnr':>8} {'ssim':>8}"
     print(header)
