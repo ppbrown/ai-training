@@ -2,6 +2,8 @@
 
 import jsonargparse, json
 import os
+import sys
+
 
 def parseargs():
     """
@@ -167,7 +169,31 @@ def parseargs():
             " at each save and write vae_sample.webp in the save dir.",
     )
 
-    args = ap.parse_args()
+    ap.add_argument(
+        "--continue_steps", type=int, default=0,
+        help="Resume training for this many additional steps. Exclusive:"
+             " must be the only argument, e.g. 'train_vae.py --continue_steps"
+             " 5000'. Must be run from the prior run's top-level directory"
+             " (the one containing ./config.json and ./final/, i.e. its"
+             " --output_dir) -- --model, --output_dir, and every other"
+             " setting are read unchanged from ./config.json. --train_steps"
+             " from the saved config is ignored -- the new total is (step"
+             " already reached) + --continue_steps.",
+    )
+
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--continue_steps":
+        if len(argv) != 2:
+            raise SystemExit("--continue_steps must be the only argument: --continue_steps N")
+        if not os.path.exists("config.json"):
+            raise SystemExit(
+                "--continue_steps must be run from the prior run's top-level"
+                " directory (no ./config.json found in the current directory)"
+            )
+        argv = ["--config", "config.json", "--output_dir", ".", "--model", "final",
+                "--continue_steps", argv[1]]
+
+    args = ap.parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "config.json")
     with open(config_path, "w") as f:

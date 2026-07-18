@@ -52,10 +52,10 @@ The accumulators track only the trainable (requires_grad) params; frozen
 params and buffers are taken from the live model at apply_to() time, so a
 saved dir is always complete regardless of what was frozen.
 
-NOTE: accumulators are not checkpointed for resume. A saved EMA dir is a
-valid VAE on its own, but the running accumulator state is not restored
-across a --skip_steps restart; treat each uninterrupted run's snapshots as
-belonging to that run.
+Accumulator state (the shadows and step counter t) can be checkpointed via
+state_dict()/load_state_dict() so a --continue_steps resume picks up the
+EMA average exactly where it left off, rather than restarting it from the
+resumed model weights.
 """
 
 import numpy as np
@@ -124,3 +124,21 @@ class PowerEma:
             if n in self.backup:
                 p.copy_(self.backup[n])
         self.backup = {}
+
+    def state_dict(self) -> dict:
+        """Snapshot the step counter and all shadows for checkpointing."""
+        return {
+            "t": self.t,
+            "shadows": [
+                {n: p.detach().clone() for n, p in shadow.items()}
+                for shadow in self.shadows
+            ],
+        }
+
+    @torch.no_grad()
+    def load_state_dict(self, state: dict) -> None:
+        """Restore the step counter and shadows saved by state_dict()."""
+        self.t = state["t"]
+        for shadow, saved in zip(self.shadows, state["shadows"]):
+            for n in shadow:
+                shadow[n].copy_(saved[n])

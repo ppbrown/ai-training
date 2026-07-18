@@ -406,6 +406,41 @@ def iter_step_batches(
 
 
 # -----------------------------
+# Training-state checkpointing (for --continue_steps)
+# -----------------------------
+
+def save_training_state(
+    path: Path,
+    step: int,
+    opt,
+    scheduler,
+    ema,
+    disc,
+    opt_d,
+    packs: List[LoaderPack],
+) -> None:
+    """Save everything besides model weights needed to cleanly resume training."""
+    state = {
+        "step": step,
+        "optimizer": opt.state_dict(),
+        "python_random_state": random.getstate(),
+        "torch_rng_state": torch.get_rng_state(),
+        "pack_epochs": {p.name: p.epoch for p in packs},
+    }
+    if torch.cuda.is_available():
+        state["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+    if scheduler is not None:
+        state["scheduler"] = scheduler.state_dict()
+    if ema is not None:
+        state["ema"] = ema.state_dict()
+    if disc is not None:
+        state["disc"] = disc.state_dict()
+        state["opt_d"] = opt_d.state_dict()
+    torch.save(state, path)
+    print(f"Saved training state: {path}", flush=True)
+
+
+# -----------------------------
 # Main
 # -----------------------------
 
@@ -427,12 +462,29 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    resume_state = None
+    if args.continue_steps > 0:
+        state_path = Path(args.model) / "training_state.pt"
+        if not state_path.exists():
+            raise SystemExit(f"--continue_steps: no training_state.pt found at {state_path}")
+        resume_state = torch.load(state_path, map_location=device, weights_only=False)
+        args.train_steps = resume_state["step"] + args.continue_steps
+        args.skip_steps = 0
+        print(f"--continue_steps: resuming from step {resume_state['step']},"
+              f" training to step {args.train_steps}")
+
     try:
-        vae = AutoencoderKL.from_pretrained(
-            args.model,
-            subfolder="vae",
-            torch_dtype=torch.float32,
-        ).to(device)
+        if args.continue_steps > 0:
+            vae = AutoencoderKL.from_pretrained(
+                args.model,
+                torch_dtype=torch.float32,
+            ).to(device)
+        else:
+            vae = AutoencoderKL.from_pretrained(
+                args.model,
+                subfolder="vae",
+                torch_dtype=torch.float32,
+            ).to(device)
     except EnvironmentError:
         raise SystemExit("ERROR: Cannot load model from", args.model)
 
@@ -474,6 +526,9 @@ def main() -> None:
     ema = None
     if args.use_ema:
         ema = PowerEma(vae, sigma_rels=args.ema_sigma_rels)
+        if resume_state is not None and "ema" in resume_state:
+            ema.load_state_dict(resume_state["ema"])
+            print(f"Restored EMA state (t={ema.t})")
         print(f"EMA enabled: sigma_rels={args.ema_sigma_rels}"
               f" (gammas={[round(g, 2) for g in ema.gammas]})")
 
@@ -524,6 +579,10 @@ def main() -> None:
             betas=(0.5, 0.9),
             weight_decay=0.0,
         )
+        if resume_state is not None and "disc" in resume_state:
+            disc.load_state_dict(resume_state["disc"])
+            opt_d.load_state_dict(resume_state["opt_d"])
+            print("Restored discriminator + opt_d state")
         if not args.disc_no_adaptive and not vae.decoder.conv_out.weight.requires_grad:
             args.disc_no_adaptive = True
             print("WARNING: decoder.conv_out is frozen;"
@@ -533,6 +592,18 @@ def main() -> None:
 
     if args.hires_tiling:
         print("Tiling enabled: each image produces 1 whole-image + 4 tile optimizer steps.")
+
+    # Restore RNG state right before touching the data loaders, so the
+    # shuffle/sampling draws below continue the same random walk the
+    # original run was on at checkpoint time. Doing this here (rather than
+    # earlier) keeps unrelated RNG consumption above (e.g. disc weight init)
+    # from perturbing that stream.
+    if resume_state is not None:
+        random.setstate(resume_state["python_random_state"])
+        torch.set_rng_state(resume_state["torch_rng_state"].cpu())
+        if torch.cuda.is_available() and "cuda_rng_state" in resume_state:
+            torch.cuda.set_rng_state_all(resume_state["cuda_rng_state"])
+        print("Restored RNG state for dataset shuffling continuity")
 
     # Build data loaders
     import os
@@ -561,6 +632,11 @@ def main() -> None:
             th=th,
         ))
 
+    if resume_state is not None:
+        for p in packs:
+            if p.name in resume_state["pack_epochs"]:
+                p.epoch = resume_state["pack_epochs"][p.name]
+
     trainable_params = [p for p in vae.parameters() if p.requires_grad]
     optimizer_name = getattr(args, "optimizer", "adamw").lower()
     if optimizer_name == "sgd":
@@ -580,12 +656,19 @@ def main() -> None:
     else:
         raise SystemExit(f"Unsupported optimizer: {optimizer_name}")
 
+    if resume_state is not None:
+        opt.load_state_dict(resume_state["optimizer"])
+        print("Restored optimizer state")
+
     scheduler = None
     if args.warmup_steps > 0:
         def _warmup_lr(step_idx: int) -> float:
             return min(1.0, (step_idx + 1) / args.warmup_steps)
         scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_warmup_lr)
         print(f"LR warmup enabled: {args.warmup_steps} steps")
+        if resume_state is not None and "scheduler" in resume_state:
+            scheduler.load_state_dict(resume_state["scheduler"])
+            print("Restored LR scheduler state")
 
     _, sample_tw, sample_th = parse_dataset_spec(args.dataset[0])
     sample_img_path = Path(args.sample_img) if args.sample_img else None
@@ -594,8 +677,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     last_log_t = time.perf_counter()
-    last_log_step = 0
-    step = 0
+    step = resume_state["step"] if resume_state is not None else 0
+    last_log_step = step
     if args.skip_steps > 0:
         print("Skipping", args.skip_steps, "steps...")
 
@@ -723,6 +806,8 @@ def main() -> None:
     final_dir.mkdir(parents=True, exist_ok=True)
     vae.save_pretrained(str(final_dir))
     print(f"saved: {final_dir}", flush=True)
+
+    save_training_state(final_dir / "training_state.pt", step, opt, scheduler, ema, disc, opt_d, packs)
 
     if sample_img_path is not None:
         write_vae_sample_webp(
