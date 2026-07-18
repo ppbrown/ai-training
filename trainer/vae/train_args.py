@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import jsonargparse, json
+import jsonargparse
 import os
 import sys
 
@@ -196,8 +196,7 @@ def parseargs():
     args = ap.parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "config.json")
-    with open(config_path, "w") as f:
-        json.dump(vars(args), f, indent=4)
+    ap.save(args, config_path, format="json_indented", overwrite=True)
     print(f"Config saved to: {config_path}")
     return args
 

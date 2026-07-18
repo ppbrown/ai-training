@@ -467,7 +467,17 @@ def main() -> None:
         state_path = Path(args.model) / "training_state.pt"
         if not state_path.exists():
             raise SystemExit(f"--continue_steps: no training_state.pt found at {state_path}")
-        resume_state = torch.load(state_path, map_location=device, weights_only=False)
+        # Load to CPU, not `device`: this runs before the VAE is loaded and
+        # before the DataLoader workers fork. Pulling the whole optimizer/EMA/
+        # disc checkpoint onto the GPU here (versus a fresh run, which only has
+        # the VAE/LPIPS on GPU by fork time) measurably increases CUDA/driver
+        # activity right before fork -- which reproduced as a hung fork-time
+        # deadlock in the DataLoader workers (main stuck on the result queue,
+        # workers stuck on their index queue, neither making progress).
+        # load_state_dict() on the optimizer/EMA/disc below all correctly cast
+        # these CPU tensors onto the already-GPU-resident targets, so this is
+        # safe.
+        resume_state = torch.load(state_path, map_location="cpu", weights_only=False)
         args.train_steps = resume_state["step"] + args.continue_steps
         args.skip_steps = 0
         print(f"--continue_steps: resuming from step {resume_state['step']},"
@@ -602,7 +612,8 @@ def main() -> None:
         random.setstate(resume_state["python_random_state"])
         torch.set_rng_state(resume_state["torch_rng_state"].cpu())
         if torch.cuda.is_available() and "cuda_rng_state" in resume_state:
-            torch.cuda.set_rng_state_all(resume_state["cuda_rng_state"])
+            cuda_rng_state = [t.cpu() for t in resume_state["cuda_rng_state"]]
+            torch.cuda.set_rng_state_all(cuda_rng_state)
         print("Restored RNG state for dataset shuffling continuity")
 
     # Build data loaders
