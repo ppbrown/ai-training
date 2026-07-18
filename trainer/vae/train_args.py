@@ -196,7 +196,18 @@ def parseargs():
     args = ap.parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "config.json")
-    ap.save(args, config_path, format="json_indented", overwrite=True)
+    # Write to a temp file and rename over the real path: os.replace() is
+    # atomic (same filesystem, since both live under output_dir), so a
+    # mid-write crash can only leave a stray .tmp file, never a truncated
+    # config.json.
+    tmp_path = config_path + ".tmp"
+    try:
+        ap.save(args, tmp_path, format="json_indented", overwrite=True)
+        os.replace(tmp_path, config_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
     print(f"Config saved to: {config_path}")
     return args
 
