@@ -53,7 +53,9 @@ def parse_args():
     p.add_argument(
         "--model",
         default="stable-diffusion-v1-5/stable-diffusion-v1-5",
-                   help="HF repo or local dir (default=stabilityai/stable-diffusion-xl-base-1.0)"
+                   help="HF repo or local dir "
+                   "(default=stabilityai/stable-diffusion-v1-5. "
+                   "Alternative could be stabilityai/sd-vae-ft-mse)"
     )
     p.add_argument("--vae", action="store_true", help="Treat model as direct vae, not full pipeline")
     p.add_argument("--cpu", action="store_true")
@@ -66,6 +68,13 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png"])
     p.add_argument("--custom", action="store_true", help="Treat model as custom pipeline")
+    p.add_argument("--writepreview", action="store_true", help="Also save a webp preview decoded from the latent")
+    p.add_argument(
+        "--previewonly",
+        action="store_true",
+        default=False,
+        help="Add a webp view of the cache data. Useful for quality checking.",
+    )
     return p.parse_args()
 
 
@@ -131,12 +140,20 @@ def main():
         device = "cpu"
         args.batch_size = 1
 
+    if args.previewonly:
+        args.writepreview = True
+
     # Collect images
     all_image_paths = find_images(args.data_root, args.extensions)
     image_paths = []
     skipped = 0
     for path in all_image_paths:
         out_path = path.with_name(path.stem + args.out_suffix)
+        if args.previewonly:
+            preview_path = out_path.with_name(out_path.name + ".webp")
+            if preview_path.exists():
+                skipped += 1
+                continue
         if out_path.exists():
             skipped += 1
             continue
@@ -182,7 +199,8 @@ def main():
         # Save each latent as its own safetensors file
         for j, path in enumerate(valid_paths):
             out_path = path.with_name(path.stem + args.out_suffix)
-            st.save_file({"latent": latents[j]}, str(out_path))
+            if not args.previewonly:
+                st.save_file({"latent": latents[j]}, str(out_path))
             if args.writepreview:
                 pil_img = decode_latent_to_pil(vae, latents[j])
                 pil_img.save(str(out_path) + ".webp", format="WEBP", lossless=True, method=6)
