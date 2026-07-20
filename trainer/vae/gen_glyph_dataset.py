@@ -71,6 +71,13 @@ FONT_CHOICES = [
     "Linux Libertine",
 ]
 
+# Color bands for randomized fg/bg (--bw disables this). Each channel is
+# drawn independently from whichever band, so hue varies while staying
+# clearly on the dark or light side -- the gap between the bands (86-169)
+# is the excluded midtone range.
+DARK_COLOR_RANGE = (0, 85)
+LIGHT_COLOR_RANGE = (170, 255)
+
 BASE_PPI = 144  # arbitrary internal constant for px->pt conversion; cancels
                 # out mathematically and has no effect on final pixel output
                 # (see render_with_typst). Not exposed as a CLI knob.
@@ -185,6 +192,20 @@ def typst_escape(text: str) -> str:
     return TYPST_ESCAPE_RE.sub(r"\\\1", text)
 
 
+def _random_side_color(side: str) -> str:
+    lo, hi = DARK_COLOR_RANGE if side == "dark" else LIGHT_COLOR_RANGE
+    r, g, b = (random.randint(lo, hi) for _ in range(3))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def random_fg_bg_colors() -> tuple[str, str]:
+    """Pick a fg color from the dark or light band, then a bg color from
+    the opposite band, so contrast is always high but hue still varies."""
+    fg_side = random.choice(("dark", "light"))
+    bg_side = "light" if fg_side == "dark" else "dark"
+    return _random_side_color(fg_side), _random_side_color(bg_side)
+
+
 def px_to_pt(px: float, ppi: int) -> float:
     """Typst page/margin sizes are in points (1pt = 1/72in); PNG export
     rasterizes at --ppi. To land on an exact pixel size regardless of ppi,
@@ -206,7 +227,8 @@ def estimate_text_height_px(text: str, font_size_px: float, content_width_px: fl
 def build_typst_source(text: str, font: str, font_size_px: float,
                         width_px: float, height_px: float,
                         margin_top_px: float, margin_bottom_px: float,
-                        margin_left_px: float, margin_right_px: float) -> str:
+                        margin_left_px: float, margin_right_px: float,
+                        fg_color: str = "#000000", bg_color: str = "#ffffff") -> str:
     width_pt = px_to_pt(width_px, BASE_PPI)
     height_pt = px_to_pt(height_px, BASE_PPI)
     mt_pt = px_to_pt(margin_top_px, BASE_PPI)
@@ -217,8 +239,8 @@ def build_typst_source(text: str, font: str, font_size_px: float,
     escaped = typst_escape(text)
     margin = f"(top: {mt_pt}pt, bottom: {mb_pt}pt, left: {ml_pt}pt, right: {mr_pt}pt)"
     return (
-        f'#set page(width: {width_pt}pt, height: {height_pt}pt, margin: {margin}, fill: white)\n'
-        f'#set text(font: "{font}", size: {font_size_pt}pt, fill: black)\n'
+        f'#set page(width: {width_pt}pt, height: {height_pt}pt, margin: {margin}, fill: rgb("{bg_color}"))\n'
+        f'#set text(font: "{font}", size: {font_size_pt}pt, fill: rgb("{fg_color}"))\n'
         f'#set par(justify: true)\n'
         f"{escaped}\n"
     )
@@ -267,6 +289,12 @@ def main() -> int:
                      help="disable randomized vertical placement (default: text lands at a random "
                           "vertical offset on the page instead of always starting at the top)")
 
+    ap.add_argument("--bw", action="store_true",
+                     help="disable color randomization: always render black text on a white "
+                          "background (the previous default). Without this flag, each chunk gets "
+                          "a random fg/bg pair -- fg is drawn from the dark or light side, bg from "
+                          "the opposite side, so contrast stays high but hue varies")
+
     ap.add_argument("--augment", action="store_true",
                      help="randomize font/font-size/margin per-chunk from a fixed pool, for training diversity")
     ap.add_argument("--seed", type=int, default=0)
@@ -287,8 +315,15 @@ def main() -> int:
         book_label = args.input_file.stem
     else:
         gid = args.gutenberg_id if args.gutenberg_id else GUTENBERG_BOOKS[args.book]
-        print(f"Fetching Gutenberg id={gid} ...")
-        raw_text = fetch_gutenberg_text(gid)
+        cache_path = Path(f"gutenberg.{gid}")
+        if cache_path.exists():
+            print(f"Using cached file {cache_path} ...")
+            raw_text = cache_path.read_text(encoding="utf-8", errors="replace")
+        else:
+            print(f"Fetching Gutenberg id={gid} ...")
+            raw_text = fetch_gutenberg_text(gid)
+            cache_path.write_text(raw_text, encoding="utf-8")
+            print("Wrote", cache_path)
         book_label = args.book or f"gutenberg_{gid}"
 
     text = strip_boilerplate(raw_text)
@@ -345,8 +380,14 @@ def main() -> int:
                 margin_top = random.uniform(args.margin, max_top_margin)
             margin_bottom = args.margin
 
+            if args.bw:
+                fg_color, bg_color = "#000000", "#ffffff"
+            else:
+                fg_color, bg_color = random_fg_bg_colors()
+
             src = build_typst_source(chunk, font, font_size, args.page_width, args.page_height,
-                                      margin_top, margin_bottom, margin_lr, margin_lr)
+                                      margin_top, margin_bottom, margin_lr, margin_lr,
+                                      fg_color, bg_color)
 
             if args.keep_typ:
                 (typ_dir / f"{stem}.typ").write_text(src, encoding="utf-8")
@@ -358,7 +399,8 @@ def main() -> int:
                     # height estimate was wrong for this chunk -- retry once
                     # with a safe top-of-page layout instead of dropping it.
                     src = build_typst_source(chunk, font, font_size, args.page_width, args.page_height,
-                                              args.margin, args.margin, args.margin, args.margin)
+                                              args.margin, args.margin, args.margin, args.margin,
+                                              fg_color, bg_color)
                     margin_top, margin_lr = args.margin, args.margin
                     try:
                         render_with_typst(src, png_path, int(args.page_width), int(args.page_height))
@@ -377,6 +419,8 @@ def main() -> int:
                 "book": book_label,
                 "font": font,
                 "font_size": font_size,
+                "fg_color": fg_color,
+                "bg_color": bg_color,
                 "margin_top_px": round(margin_top, 1),
                 "margin_lr_px": round(margin_lr, 1),
                 "chars": len(chunk),
