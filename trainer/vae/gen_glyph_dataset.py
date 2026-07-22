@@ -63,7 +63,7 @@ ASCII_MAP = {
 
 TYPST_ESCAPE_RE = re.compile(r'([\\#*_$`@<>\[\]])')
 
-FONT_CHOICES = [
+AUGMENT_FONT_CHOICES = [
     "Libertinus Serif",
     "New Computer Modern",
     "DejaVu Sans",
@@ -213,15 +213,39 @@ def px_to_pt(px: float, ppi: int) -> float:
     return px * 72.0 / ppi
 
 
-def estimate_text_height_px(text: str, font_size_px: float, content_width_px: float) -> float:
-    """Rough estimate of rendered paragraph height, used only to keep a
-    randomized top margin from overflowing the page. Doesn't need to be
-    exact -- render_with_typst falls back to a safe layout if it's wrong."""
-    avg_char_width_px = font_size_px * 0.52
-    chars_per_line = max(1, int(content_width_px / avg_char_width_px))
-    n_lines = -(-len(text) // chars_per_line)  # ceil div
-    line_height_px = font_size_px * 1.35
-    return n_lines * line_height_px
+# ppi for the height-measurement pass below. Only page geometry (points),
+# not pixel detail, is being read back, so a small raster is enough and
+# keeps the extra compile cheap regardless of the real target resolution.
+MEASURE_PPI = 36
+
+
+def measure_content_height_px(text: str, font: str, font_size_px: float,
+                               width_px: float, margin_lr_px: float) -> float:
+    """Ask Typst itself how tall this text renders for this font/size/width,
+    via page height: auto, instead of guessing from a fixed average-char-width
+    ratio (which undershoots wider-set fonts like DejaVu Serif and let text
+    overflow onto a second page). Same font/size/justify/width as the real
+    render, so line breaks match and the reported height is exact rather than
+    estimated."""
+    width_pt = px_to_pt(width_px, BASE_PPI)
+    margin_lr_pt = px_to_pt(margin_lr_px, BASE_PPI)
+    font_size_pt = px_to_pt(font_size_px, BASE_PPI)
+    escaped = typst_escape(text)
+    margin = f"(top: 0pt, bottom: 0pt, left: {margin_lr_pt}pt, right: {margin_lr_pt}pt)"
+    source = (
+        f'#set page(width: {width_pt}pt, height: auto, margin: {margin})\n'
+        f'#set text(font: "{font}", size: {font_size_pt}pt)\n'
+        f'#set par(justify: true)\n'
+        f"{escaped}\n"
+    )
+    raw_bytes = typst.compile(source.encode("utf-8"), format="png", ppi=float(MEASURE_PPI))
+    if isinstance(raw_bytes, list):
+        raw_bytes = raw_bytes[0]
+    from PIL import Image
+    import io
+    height_px_at_measure_ppi = Image.open(io.BytesIO(raw_bytes)).height
+    height_pt = height_px_at_measure_ppi * 72.0 / MEASURE_PPI
+    return height_pt * BASE_PPI / 72.0
 
 
 def build_typst_source(text: str, font: str, font_size_px: float,
@@ -254,6 +278,11 @@ def render_with_typst(source: str, png_path: Path, target_width_px: int, target_
     render_ppi = BASE_PPI * SUPERSAMPLE
     try:
         raw_bytes = typst.compile(source.encode("utf-8"), format="png", ppi=float(render_ppi))
+        if isinstance(raw_bytes, list):
+            # typst.compile() returns one bytes object per page when the
+            # content overflows onto multiple pages -- treat as the same
+            # overflow case the caller already retries on.
+            raise RuntimeError(f"content overflowed onto multiple pages ({len(raw_bytes)})")
         from PIL import Image
         import io
         im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
@@ -297,7 +326,9 @@ def main() -> int:
 
     ap.add_argument("--augment", action="store_true",
                      help="randomize font/font-size/margin per-chunk from a fixed pool, for training diversity")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                     help="seed the RNG for reproducible colors/placement/augmentation across runs. "
+                          "Default: unseeded, so each run is genuinely random.")
     ap.add_argument("--keep-typ", action="store_true", help="keep intermediate .typ source files")
 
     args = ap.parse_args()
@@ -308,7 +339,8 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    random.seed(args.seed)
+    if args.seed is not None:
+        random.seed(args.seed)
 
     if args.input_file:
         raw_text = args.input_file.read_text(encoding="utf-8", errors="replace")
@@ -354,7 +386,7 @@ def main() -> int:
             font = args.font
             font_size = args.font_size
             if args.augment:
-                font = random.choice(FONT_CHOICES)
+                font = random.choice(AUGMENT_FONT_CHOICES)
                 font_size = round(random.uniform(11.0, 18.0), 1)
 
             # Shorter chunks get wider left/right margins (narrower column)
@@ -366,13 +398,19 @@ def main() -> int:
                 margin_lr += random.uniform(-8.0, 8.0)
             margin_lr = max(4.0, margin_lr)
 
-            # Randomize vertical placement: estimate how tall the rendered
-            # text will be, then pick a random top margin within whatever
-            # slack remains so text doesn't always start at the top of the
-            # page. Bottom margin stays at the base value; Typst just leaves
-            # blank space below short text, it doesn't need to match.
-            content_width = max(1.0, args.page_width - 2 * margin_lr)
-            est_height = estimate_text_height_px(chunk, font_size, content_width)
+            # Randomize vertical placement: measure how tall the rendered
+            # text actually is (via Typst's own layout, see
+            # measure_content_height_px), then pick a random top margin
+            # within whatever slack remains so text doesn't always start at
+            # the top of the page. Bottom margin stays at the base value;
+            # Typst just leaves blank space below short text, it doesn't
+            # need to match.
+            try:
+                est_height = measure_content_height_px(chunk, font, font_size, args.page_width, margin_lr)
+            except Exception as e:  # noqa: BLE001 -- typst.TypstError etc.
+                print(f"[warn] height measurement failed for chunk {i}, using top-of-page layout: {e}",
+                      file=sys.stderr)
+                est_height = args.page_height  # forces the top-of-page fallback below
             max_top_margin = args.page_height - args.margin - est_height
             if args.no_vary_position or max_top_margin <= args.margin:
                 margin_top = args.margin
