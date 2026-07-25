@@ -508,6 +508,28 @@ def main() -> None:
     if args.freeze_all_channels and (args.freeze_channels or args.freeze_backbone):
         raise SystemExit("--freeze_all_channels is mutually exclusive with --freeze_backbone and --freeze_channels")
 
+    if args.freeze_encoder and args.freeze_decoder:
+        raise SystemExit("--freeze_encoder and --freeze_decoder cannot both be set (nothing left to train)")
+
+    if args.freeze_channels and (args.freeze_encoder or args.freeze_decoder):
+        raise SystemExit(
+            "--freeze_channels cannot be combined with --freeze_encoder or --freeze_decoder:"
+            " those freeze quant_conv/post_quant_conv outright, leaving the per-channel"
+            " gradient hooks nothing to attach to."
+        )
+
+    if args.freeze_encoder:
+        for m in (vae.encoder, vae.quant_conv):
+            for p in m.parameters():
+                p.requires_grad_(False)
+        print("Frozen encoder (encoder + quant_conv); training only the decoder")
+
+    if args.freeze_decoder:
+        for m in (vae.decoder, vae.post_quant_conv):
+            for p in m.parameters():
+                p.requires_grad_(False)
+        print("Frozen decoder (decoder + post_quant_conv); training only the encoder")
+
     _CHANNEL_MODULES = [
         vae.encoder.conv_out,
         vae.quant_conv,
