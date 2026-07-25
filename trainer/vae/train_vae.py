@@ -440,6 +440,57 @@ def save_training_state(
     print(f"Saved training state: {path}", flush=True)
 
 
+def save_vae_checkpoint(
+    save_dir: Path,
+    vae,
+    step: int,
+    opt,
+    scheduler,
+    ema,
+    disc,
+    opt_d,
+    packs: List[LoaderPack],
+    sample_img_path: Optional[Path],
+    sample_tw: int,
+    sample_th: int,
+) -> None:
+    """Save model weights, training state, and optional sample/EMA variants to save_dir.
+    Shared by the normal end-of-training save and the Ctrl-C interruption save.
+    """
+    save_dir.mkdir(parents=True, exist_ok=True)
+    vae.save_pretrained(str(save_dir))
+    print(f"saved: {save_dir}", flush=True)
+
+    save_training_state(save_dir / "training_state.pt", step, opt, scheduler, ema, disc, opt_d, packs)
+
+    if sample_img_path is not None:
+        write_vae_sample_webp(
+            vae_model=vae,
+            sample_img=sample_img_path,
+            target_w=sample_tw,
+            target_h=sample_th,
+            out_path=save_dir / "vae_sample.webp",
+        )
+
+    if ema is not None:
+        for idx, sr in enumerate(ema.sigma_rels):
+            ema.apply_to(vae, idx)
+            try:
+                ema_dir = save_dir / "ema" / f"sr{sr:.4f}"
+                vae.save_pretrained(str(ema_dir))
+                print(f"saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
+                if sample_img_path is not None:
+                    write_vae_sample_webp(
+                        vae_model=vae,
+                        sample_img=sample_img_path,
+                        target_w=sample_tw,
+                        target_h=sample_th,
+                        out_path=ema_dir / "vae_sample.webp",
+                    )
+            finally:
+                ema.restore(vae)
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -715,52 +766,30 @@ def main() -> None:
     if args.skip_steps > 0:
         print("Skipping", args.skip_steps, "steps...")
 
-    while step < args.train_steps:
-        pack = random.choice(packs)
-        path_strs, x = pack.next_batch()
-        paths = [Path(p) for p in path_strs]
+    try:
+        while step < args.train_steps:
+            pack = random.choice(packs)
+            path_strs, x = pack.next_batch()
+            paths = [Path(p) for p in path_strs]
 
-        if args.skip_steps > 0:
-            step += 1
-            args.skip_steps -= 1
-            if args.skip_steps == 0:
-                print("Skipped to step", step)
-            continue
+            if args.skip_steps > 0:
+                step += 1
+                args.skip_steps -= 1
+                if args.skip_steps == 0:
+                    print("Skipped to step", step)
+                continue
 
-        # ------------------------------------------------------------------
-        # Step A: whole-image pass at target resolution (e.g. 512x512)
-        # ------------------------------------------------------------------
-        x = x.to(device, non_blocking=True)
+            # --------------------------------------------------------------
+            # Step A: whole-image pass at target resolution (e.g. 512x512)
+            # --------------------------------------------------------------
+            x = x.to(device, non_blocking=True)
 
-        loss, dec, l1, lp, edge_l1, lap_loss = compute_loss(
-            vae, x, args, device, lpips_fn, lap_kernel, miner, disc, step,
-        )
-
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if args.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
-        opt.step()
-        if scheduler is not None:
-            scheduler.step()
-        if ema is not None:
-            ema.update(vae)
-
-        if disc is not None:
-            disc_update(disc, opt_d, x, dec, args, step)
-
-        step += 1
-
-        ###################################################################
-        # Step B: tile passes (if tiling enabled) or pixelshift-derived tiles
-        # or sometimes a combination of both
-        ###################################################################
-        for x_extra in iter_step_batches(paths, pack, args, device):
-            extra_loss, extra_dec, _, _, _, _ = compute_loss(
-                vae, x_extra, args, device, lpips_fn, lap_kernel, miner, disc, step,
+            loss, dec, l1, lp, edge_l1, lap_loss = compute_loss(
+                vae, x, args, device, lpips_fn, lap_kernel, miner, disc, step,
             )
+
             opt.zero_grad(set_to_none=True)
-            extra_loss.backward()
+            loss.backward()
             if args.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
             opt.step()
@@ -768,106 +797,106 @@ def main() -> None:
                 scheduler.step()
             if ema is not None:
                 ema.update(vae)
+
             if disc is not None:
-                disc_update(disc, opt_d, x_extra, extra_dec, args, step)
+                disc_update(disc, opt_d, x, dec, args, step)
+
             step += 1
 
-        
-        # ------------------------------------------------------------------
-        # Logging
-        # ------------------------------------------------------------------
-        if (step % 50 == 0 or step == 1):
-            now = time.perf_counter()
-            denom = max(1, step - last_log_step)
-            sps = (now - last_log_t) / denom
-            last_log_t = now
-            last_log_step = step
+            ###############################################################
+            # Step B: tile passes (if tiling enabled) or pixelshift-derived
+            # tiles or sometimes a combination of both
+            ###############################################################
+            for x_extra in iter_step_batches(paths, pack, args, device):
+                extra_loss, extra_dec, _, _, _, _ = compute_loss(
+                    vae, x_extra, args, device, lpips_fn, lap_kernel, miner, disc, step,
+                )
+                opt.zero_grad(set_to_none=True)
+                extra_loss.backward()
+                if args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
+                opt.step()
+                if scheduler is not None:
+                    scheduler.step()
+                if ema is not None:
+                    ema.update(vae)
+                if disc is not None:
+                    disc_update(disc, opt_d, x_extra, extra_dec, args, step)
+                step += 1
 
-            lp_val = lp.item() if lp is not None else 0.0
-            lap_val = lap_loss.item() if lap_loss is not None else 0.0
-            edge_val = edge_l1.item() if isinstance(edge_l1, torch.Tensor) else edge_l1
+            # --------------------------------------------------------------
+            # Logging
+            # --------------------------------------------------------------
+            if (step % 50 == 0 or step == 1):
+                now = time.perf_counter()
+                denom = max(1, step - last_log_step)
+                sps = (now - last_log_t) / denom
+                last_log_t = now
+                last_log_step = step
 
-            print(
-                f"step {step}/{args.train_steps} "
-                f"l1={l1.item():.4f} lpips={lp_val:.4f} "
-                f"edge={edge_val:.4f} lap={lap_val:.4f} "
-                f"s/step={sps:.4f}",
-                flush=True,
-            )
+                lp_val = lp.item() if lp is not None else 0.0
+                lap_val = lap_loss.item() if lap_loss is not None else 0.0
+                edge_val = edge_l1.item() if isinstance(edge_l1, torch.Tensor) else edge_l1
 
-        # ------------------------------------------------------------------
-        # Checkpointing
-        # ------------------------------------------------------------------
-        if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
-            ckpt_dir = out_dir / f"step_{step:06d}"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            vae.save_pretrained(str(ckpt_dir))
-            print(f"Saved: {ckpt_dir}", flush=True)
-            print(" Datasets in use:")
-            for pack in packs:
-                print(f"   {pack.name}: {len(pack.loader.dataset)} images")
-
-            if sample_img_path is not None:
-                write_vae_sample_webp(
-                    vae_model=vae,
-                    sample_img=sample_img_path,
-                    target_w=sample_tw,
-                    target_h=sample_th,
-                    out_path=ckpt_dir / "vae_sample.webp",
+                print(
+                    f"step {step}/{args.train_steps} "
+                    f"l1={l1.item():.4f} lpips={lp_val:.4f} "
+                    f"edge={edge_val:.4f} lap={lap_val:.4f} "
+                    f"s/step={sps:.4f}",
+                    flush=True,
                 )
 
-            if ema is not None:
-                for idx, sr in enumerate(ema.sigma_rels):
-                    ema.apply_to(vae, idx)
-                    try:
-                        ema_dir = ckpt_dir / "ema" / f"sr{sr:.4f}"
-                        vae.save_pretrained(str(ema_dir))
-                        print(f"Saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
-                        if sample_img_path is not None:
-                            write_vae_sample_webp(
-                                vae_model=vae,
-                                sample_img=sample_img_path,
-                                target_w=sample_tw,
-                                target_h=sample_th,
-                                out_path=ema_dir / "vae_sample.webp",
-                            )
-                    finally:
-                        ema.restore(vae)
+            # --------------------------------------------------------------
+            # Checkpointing
+            # --------------------------------------------------------------
+            if args.save_every > 0 and (step % args.save_every == 0 or step == args.train_steps):
+                ckpt_dir = out_dir / f"step_{step:06d}"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                vae.save_pretrained(str(ckpt_dir))
+                print(f"Saved: {ckpt_dir}", flush=True)
+                print(" Datasets in use:")
+                for pack in packs:
+                    print(f"   {pack.name}: {len(pack.loader.dataset)} images")
 
-    # Final save
-    final_dir = out_dir / "final"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    vae.save_pretrained(str(final_dir))
-    print(f"saved: {final_dir}", flush=True)
-
-    save_training_state(final_dir / "training_state.pt", step, opt, scheduler, ema, disc, opt_d, packs)
-
-    if sample_img_path is not None:
-        write_vae_sample_webp(
-            vae_model=vae,
-            sample_img=sample_img_path,
-            target_w=sample_tw,
-            target_h=sample_th,
-            out_path=final_dir / "vae_sample.webp",
-        )
-
-    if ema is not None:
-        for idx, sr in enumerate(ema.sigma_rels):
-            ema.apply_to(vae, idx)
-            try:
-                ema_dir = final_dir / "ema" / f"sr{sr:.4f}"
-                vae.save_pretrained(str(ema_dir))
-                print(f"saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
                 if sample_img_path is not None:
                     write_vae_sample_webp(
                         vae_model=vae,
                         sample_img=sample_img_path,
                         target_w=sample_tw,
                         target_h=sample_th,
-                        out_path=ema_dir / "vae_sample.webp",
+                        out_path=ckpt_dir / "vae_sample.webp",
                     )
-            finally:
-                ema.restore(vae)
+
+                if ema is not None:
+                    for idx, sr in enumerate(ema.sigma_rels):
+                        ema.apply_to(vae, idx)
+                        try:
+                            ema_dir = ckpt_dir / "ema" / f"sr{sr:.4f}"
+                            vae.save_pretrained(str(ema_dir))
+                            print(f"Saved EMA (sigma_rel={sr}): {ema_dir}", flush=True)
+                            if sample_img_path is not None:
+                                write_vae_sample_webp(
+                                    vae_model=vae,
+                                    sample_img=sample_img_path,
+                                    target_w=sample_tw,
+                                    target_h=sample_th,
+                                    out_path=ema_dir / "vae_sample.webp",
+                                )
+                        finally:
+                            ema.restore(vae)
+    except KeyboardInterrupt:
+        print("\nCtrl-C caught; saving checkpoint to 'interruption_save'...", flush=True)
+        save_vae_checkpoint(
+            out_dir / "interruption_save", vae, step, opt, scheduler, ema, disc, opt_d, packs,
+            sample_img_path, sample_tw, sample_th,
+        )
+        raise SystemExit(130)
+
+    # Final save
+    save_vae_checkpoint(
+        out_dir / "final", vae, step, opt, scheduler, ema, disc, opt_d, packs,
+        sample_img_path, sample_tw, sample_th,
+    )
 
 
 if __name__ == "__main__":
