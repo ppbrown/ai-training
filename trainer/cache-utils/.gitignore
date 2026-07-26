@@ -2,4 +2,4 @@ __pycache__
 *.img_*
 *.jpg
 *.webp
-cpu_create_clipl_cache.py cpu_create_imgcache_sdxl.py cpu_create_imgcache_sdxl.py.old cpu_create_t5cache_768.py
+cpu_*
