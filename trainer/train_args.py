@@ -7,7 +7,7 @@ import argparse
 from argparse import BooleanOptionalAction
 
 def parse_args():
-    p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save")
+    p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save after current batch")
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
     p.add_argument("--cpu_offload", action="store_true",
@@ -120,7 +120,8 @@ def parse_args():
     p.add_argument("--reinit_unet", action="store_true",
                    help="Train from scratch unet (Do not use, this is broken)")
     p.add_argument("--unfreeze_attention", action="store_true",
-                   help="Just unfreeze, dont reinit.")
+                   help="Just unfreeze, dont reinit. "
+                   "You may want to also use --unfreeze_in and --unfreeze_out")
     p.add_argument("--unfreeze_attn2", action="store_true",
                    help="Just unfreeze, dont reinit.")
 
