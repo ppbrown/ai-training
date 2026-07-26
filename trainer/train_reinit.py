@@ -368,18 +368,14 @@ def unfreeze_norms(unet, *, include_bias: bool = True) -> int:
                 mod.bias.requires_grad = True
                 toggled += 1
     return toggled
+
 def unfreeze_all_attention(unet):
     def is_attn(mod_to_check):
         n = mod_to_check.__class__.__name__
         return ("Attention" in n) or ("Transformer" in n)
-    # freeze all first
-    for p in unet.parameters(): p.requires_grad = False
     # unfreeze attention everywhere
     for _, m in unet.named_modules():
         if is_attn(m):
             for p in m.parameters():
                 p.requires_grad = True
-    # optional: keep I/O edges adapting a bit
-    for m in (unet.conv_in, unet.conv_out):
-        for p in m.parameters():
-            p.requires_grad = True
+
