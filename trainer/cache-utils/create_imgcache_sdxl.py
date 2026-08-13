@@ -8,45 +8,9 @@
     seperate processes of this, after splitting up dataset accordingly
 """
 
+import argparse
 import os
 import sys
-import subprocess
-
-# This stuff required for the "deterministic" settings
-ENV_VAR = "CUBLAS_WORKSPACE_CONFIG"
-DESIRED = ":4096:8"  # Or ":16:8" if preferred
-
-if os.environ.get(ENV_VAR) != DESIRED:
-    os.environ[ENV_VAR] = DESIRED
-    print(f"[INFO] Setting {ENV_VAR}={DESIRED} and re-executing.")
-    args = [sys.executable] + sys.argv
-    # Use os.execvpe to replace the current process (no zombie parent)
-    os.execvpe(args[0], args, os.environ)
-    sys.exit(1) # If exec fails, exit explicitly
-
-import argparse
-from pathlib import Path
-from tqdm.auto import tqdm
-
-import torch
-import torchvision.transforms as TVT
-from torchvision.transforms import InterpolationMode as IM
-import torchvision.transforms.functional as F
-
-import safetensors.torch as st
-from diffusers import DiffusionPipeline, AutoencoderKL
-from PIL import Image
-from show_vae_latent import decode_latent_to_pil
-
-
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-torch.use_deterministic_algorithms(True)
-torch.backends.cudnn.deterministic = True
-
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
 
 
 def parse_args():
@@ -80,6 +44,45 @@ def parse_args():
     p.add_argument("--extensions", nargs="+", default=["jpg", "jpeg", "png"])
     p.add_argument("--custom", action="store_true", help="Treat model as custom pipeline")
     return p.parse_args()
+
+
+# Parse args immediately, before any heavy imports or the respawn below,
+# so that -h / bad args exit fast.
+args = parse_args()
+
+# This stuff required for the "deterministic" settings
+ENV_VAR = "CUBLAS_WORKSPACE_CONFIG"
+DESIRED = ":4096:8"  # Or ":16:8" if preferred
+
+if os.environ.get(ENV_VAR) != DESIRED:
+    os.environ[ENV_VAR] = DESIRED
+    print(f"[INFO] Setting {ENV_VAR}={DESIRED} and re-executing.")
+    exec_argv = [sys.executable] + sys.argv
+    # Use os.execvpe to replace the current process (no zombie parent)
+    os.execvpe(exec_argv[0], exec_argv, os.environ)
+    sys.exit(1) # If exec fails, exit explicitly
+
+from pathlib import Path
+from tqdm.auto import tqdm
+
+import torch
+import torchvision.transforms as TVT
+from torchvision.transforms import InterpolationMode as IM
+import torchvision.transforms.functional as F
+
+import safetensors.torch as st
+from diffusers import DiffusionPipeline, AutoencoderKL
+from PIL import Image
+from show_vae_latent import decode_latent_to_pil
+
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = True
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 
 def find_images(input_dir, exts):
@@ -137,7 +140,6 @@ def _load_vae_fp32(model_id: str, vae: bool):
 @torch.no_grad()
 def main():
     global device
-    args = parse_args()
 
     if args.cpu:
         print("Forcing CPU")
