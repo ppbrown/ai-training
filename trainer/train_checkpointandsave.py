@@ -1,14 +1,33 @@
 import os
 import shutil
-from pathlib import Path
 
+import torch
 from tqdm.auto import tqdm
 
 from train_state import TrainState
 from train_utils import sample_img, log_unet_l2_norm
 
 
-def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
+def save_train_state(path, optim, lr_sched, tstate: TrainState):
+    """Save optimizer/scheduler/RNG/counters needed to resume with --continue_steps."""
+    state = {
+        "global_step": tstate.global_step,
+        "batch_count": tstate.batch_count,
+        "optimizer": optim.state_dict(),
+        "torch_rng_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+    if lr_sched is not None:
+        state["scheduler"] = lr_sched.state_dict()
+    torch.save(state, path)
+    print(f"Saved training state: {path}")
+
+
+def checkpointandsave(pipe, unet, accelerator, tstate: TrainState,
+                      optim=None, lr_sched=None,
+                      save_training_state=False, tag=None,
+                      skip_sample=False):
     args = tstate.args
 
     if args.is_custom:
@@ -21,8 +40,11 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
         return
     log_unet_l2_norm(unet, tstate.tb_writer, tstate.batch_count)
 
-    ckpt_dir = os.path.join(args.output_dir,
-                            f"checkpoint-{tstate.batch_count:05}")
+    if tag:
+        ckpt_dir = os.path.join(args.output_dir, tag)
+    else:
+        ckpt_dir = os.path.join(args.output_dir,
+                                f"checkpoint-{tstate.batch_count:05}")
     if os.path.exists(ckpt_dir):
         print(f"Checkpoint {ckpt_dir} already exists. Skipping redundant save")
         return
@@ -34,7 +56,7 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
     print(f"Saving checkpoint to {ckpt_dir}")
     pipe.save_pretrained(ckpt_dir, safe_serialization=True)
     pipe.text_encoder, pipe.unet = pinned_te, pinned_unet
-    if args.sample_prompt is not None:
+    if args.sample_prompt is not None and not skip_sample:
         sample_img(args, args.seed, ckpt_dir,
                    custom_pipeline)
     if args.copy_config:
@@ -43,14 +65,13 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState):
             tqdm.write(f"Copying {args.copy_config} to {args.output_dir}")
             shutil.copy(args.copy_config, args.output_dir)
 
-            import yaml
-            savefile = os.path.join(args.output_dir, "args.yaml")
-            tqdm.write(f"Saving commandline to  {savefile}")
-            Path(savefile).write_text(yaml.safe_dump(vars(args), sort_keys=True))
-
     savefile = os.path.join(ckpt_dir, "latent_paths")
     with open(savefile, "w") as f:
         f.write('\n'.join(tstate.latent_paths) + '\n')
         f.close()
     print("Wrote", len(tstate.latent_paths), "loglines to", savefile)
     tstate.latent_paths = []
+
+    if save_training_state:
+        save_train_state(os.path.join(ckpt_dir, "training_state.pt"),
+                         optim, lr_sched, tstate)
