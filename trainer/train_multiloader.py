@@ -49,3 +49,21 @@ class InfiniteLoader:
         Useful for epoch lenth calculationns
         """
         return self._shortest_len
+
+    def shutdown(self):
+        """
+        Explicitly tear down each underlying DataLoader's worker
+        processes now, instead of leaving it to GC/atexit timing -
+        which can leave persistent_workers running for a noticeable
+        stretch after the script has already returned control to the
+        shell.
+        """
+        for it in self._iters:
+            shutdown_fn = getattr(it, "_shutdown_workers", None)
+            if shutdown_fn is None:
+                continue
+            try:
+                shutdown_fn()
+            except Exception as e:
+                print("warning: error shutting down dataloader workers:", e)
+        self._iters = []

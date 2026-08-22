@@ -19,7 +19,7 @@ from train_checkpointandsave import checkpointandsave
 
 # --------------------------------------------------------------------------- #
 
-import os, math
+import os, math, signal
 from tqdm.auto import tqdm
 
 import torch
@@ -69,11 +69,43 @@ from train_utils import collate_fn, sample_img
 # Main                                              #
 #####################################################
 
+_interrupt_requested = False
+
+
+def _request_interrupt(signum, frame):
+    """First Ctrl-C: wait for a clean step, then save. Second Ctrl-C: abort now."""
+    global _interrupt_requested
+    if _interrupt_requested:
+        raise KeyboardInterrupt
+    _interrupt_requested = True
+    print("\nCtrl-C caught; will save full training state at the next clean step."
+          " Press Ctrl-C again to abort immediately without saving.")
+
+
 def main():
     torch.manual_seed(args.seed)
     peak_lr = args.learning_rate
 
     print("Training type:", "fp32" if args.fp32 else "mixed precision")
+
+    resume_state = None
+    resume_model_dir = None
+    if args.continue_steps > 0:
+        resume_model_dir = os.path.join(args.output_dir, "final")
+        if not os.path.exists(os.path.join(resume_model_dir, "training_state.pt")):
+            fallback_dir = os.path.join(args.output_dir, "interrupted")
+            if os.path.exists(os.path.join(fallback_dir, "training_state.pt")):
+                resume_model_dir = fallback_dir
+                print(f"--continue_steps: no final/training_state.pt found;"
+                      f" falling back to {resume_model_dir}/")
+            else:
+                print("ERROR: --continue_steps: no training_state.pt found under",
+                      os.path.join(args.output_dir, "final"), "or", fallback_dir)
+                exit(1)
+        resume_state = torch.load(os.path.join(resume_model_dir, "training_state.pt"),
+                                  map_location="cpu", weights_only=False)
+        print(f"--continue_steps: resuming from batch {resume_state['batch_count']},"
+              f" loading model from {resume_model_dir}")
 
     model_dtype = torch.float32  # Always load master in full fp32
     compute_dtype = torch.float32 if args.fp32 else torch.bfloat16  # runtime math dtype
@@ -92,15 +124,16 @@ def main():
     else:
         custom_pipeline = None
 
-    print(f"Loading '{args.pretrained_model}' Custom pipeline? {custom_pipeline}")
+    model_path = resume_model_dir if resume_state is not None else args.pretrained_model
+    print(f"Loading '{model_path}' Custom pipeline? {custom_pipeline}")
     try:
         pipe = DiffusionPipeline.from_pretrained(
-            args.pretrained_model,
+            model_path,
             custom_pipeline=custom_pipeline,
             torch_dtype=model_dtype
         )
     except Exception as e:
-        print("Error loading model", args.pretrained_model)
+        print("Error loading model", model_path)
         print(e)
         exit(0)
 
@@ -256,6 +289,13 @@ def main():
 
     # ----- load data, set training params ------------------------------------------------ #
 
+    if resume_state is not None:
+        torch.set_rng_state(resume_state["torch_rng_state"].cpu())
+        if torch.cuda.is_available() and "cuda_rng_state" in resume_state:
+            cuda_rng_state = [t.cpu() for t in resume_state["cuda_rng_state"]]
+            torch.cuda.set_rng_state_all(cuda_rng_state)
+        print("Restored RNG state for dataset shuffling continuity")
+
     bs = args.batch_size
     accum = args.gradient_accum
     effective_batch_size = bs * accum
@@ -299,7 +339,10 @@ def main():
           "as image count per epoch:",
           ebs_steps_per_epoch, "steps per epoch")
 
-    if args.max_steps and args.max_steps.endswith("e"):
+    if resume_state is not None:
+        max_steps = resume_state["batch_count"] + args.continue_steps
+        print(f"--continue_steps: training to step {max_steps}")
+    elif args.max_steps and args.max_steps.endswith("e"):
         max_steps = float(args.max_steps.removesuffix("e"))
         max_steps = max_steps * ebs_steps_per_epoch
     else:
@@ -359,6 +402,10 @@ def main():
     else:
         print("ERROR: unrecognized optimizer setting")
         exit(1)
+
+    if resume_state is not None:
+        optim.load_state_dict(resume_state["optimizer"])
+        print("Restored optimizer state")
 
     # -- optimizer settings...
     print("Using optimizer", args.optimizer)
@@ -432,6 +479,10 @@ def main():
     else:
         lr_sched = get_scheduler(args.scheduler, **scheduler_args)
 
+    if resume_state is not None and "scheduler" in resume_state:
+        lr_sched.load_state_dict(resume_state["scheduler"])
+        print("Restored LR scheduler state")
+
     lr_sched = accelerator.prepare(lr_sched)
 
     tstate = TrainState(args=args,
@@ -440,6 +491,9 @@ def main():
                         latent_scaling=latent_scaling,
                         noise_sched=noise_sched,
                         )
+    if resume_state is not None:
+        tstate.global_step = resume_state["global_step"]
+        tstate.batch_count = resume_state["batch_count"]
 
     run_name = os.path.basename(args.output_dir)
     tstate.tb_writer = SummaryWriter(log_dir=os.path.join("tensorboard/", run_name))
@@ -450,68 +504,102 @@ def main():
     tstate.total_epochs = math.ceil(max_steps / ebs_steps_per_epoch)
     mix_iter = iter(mix_loader)
 
-    for epoch_count in range(tstate.total_epochs):
-        tstate.epoch_count = epoch_count
+    # Ctrl-C waits for a clean step (gradient_accum boundary) before saving,
+    # so we never save mid-accumulation. A second Ctrl-C aborts immediately.
+    global _interrupt_requested
+    _interrupt_requested = False
+    old_sigint_handler = signal.signal(signal.SIGINT, _request_interrupt)
 
-        if args.save_on_epoch:
-            checkpointandsave(pipe, unet, accelerator, tstate)
+    try:
+        for epoch_count in range(tstate.total_epochs):
+            tstate.epoch_count = epoch_count
 
-        if args.scheduler_at_epoch:
-            # Implement a stair-stepped decay, updating on epoch to what the smooth would be at this point
-            lr_sched.step(tstate.batch_count)
+            if args.save_on_epoch:
+                checkpointandsave(pipe, unet, accelerator, tstate)
 
-        tstate.pbar = tqdm(range(ebs_steps_per_epoch),
-                           desc=f"E{epoch_count}/{tstate.total_epochs}",
-                           bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
-                           dynamic_ncols=True,
-                           leave=True)
+            if args.scheduler_at_epoch:
+                # Implement a stair-stepped decay, updating on epoch to what the smooth would be at this point
+                lr_sched.step(tstate.batch_count)
 
-        # "batch" is actually micro-batch
-        # yes this will stop at end of shortest dataset.
-        # Every dataset will get equal value. I'm not messing around with
-        #  custom "balancing"
-        for _ in range(micro_steps_per_epoch):
+            tstate.pbar = tqdm(range(ebs_steps_per_epoch),
+                               desc=f"E{epoch_count}/{tstate.total_epochs}",
+                               bar_format="{l_bar}{bar}|{n_fmt}/{total_fmt} {rate_fmt}{postfix}",
+                               dynamic_ncols=True,
+                               leave=True)
+
+            # "batch" is actually micro-batch
+            # yes this will stop at end of shortest dataset.
+            # Every dataset will get equal value. I'm not messing around with
+            #  custom "balancing"
+            for _ in range(micro_steps_per_epoch):
+                if tstate.batch_count >= max_steps:
+                    break
+                step, batch_paths = next(mix_iter)
+                try:
+                    # this bumps tstate.batch_count only for EBS size
+                    train_micro_batch(unet, accelerator, batch_paths, tstate,
+                                      optim, lr_sched, ebs_steps_per_epoch)
+                except torch.OutOfMemoryError:
+                    print("OUT OF VRAM Problem in Batch:", batch_paths)
+                    exit(0)
+
+                # Now save if trigger present, OR if right stepcount
+                if tstate.global_step % args.gradient_accum == 0:
+                    if _interrupt_requested:
+                        # Ignore further SIGINT for the rest of shutdown: an
+                        # impatient second Ctrl-C landing mid-write would
+                        # corrupt the very checkpoint we're trying to
+                        # protect. Normal handling is restored in the
+                        # `finally` below, only once the save AND the
+                        # dataloader worker teardown have both finished -
+                        # so by the time the process actually exits, there's
+                        # nothing left running in the background.
+                        signal.signal(signal.SIGINT, signal.SIG_IGN)
+                        print("Clean step reached; saving full training state to 'interrupted'...")
+                        if accelerator.is_main_process:
+                            checkpointandsave(pipe, unet, accelerator, tstate,
+                                              optim=optim, lr_sched=lr_sched,
+                                              save_training_state=True, tag="interrupted",
+                                              skip_sample=True)
+                        raise KeyboardInterrupt
+
+                    trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+                    if os.path.exists(trigger_path):
+                        print("trigger.checkpoint detected. ...")
+                        checkpointandsave(pipe, unet, accelerator, tstate)
+                        try:
+                            os.remove(trigger_path)
+                        except Exception as e:
+                            print("warning: got exception", e)
+
+                    elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
+                        if tstate.batch_count > 0 and tstate.batch_count >= int(args.save_start):
+                            print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
+                            checkpointandsave(pipe, unet, accelerator, tstate)
+
+            tstate.pbar.close()
             if tstate.batch_count >= max_steps:
                 break
-            step, batch_paths = next(mix_iter)
-            try:
-                # this bumps tstate.batch_count only for EBS size
-                train_micro_batch(unet, accelerator, batch_paths, tstate,
-                                  optim, lr_sched, ebs_steps_per_epoch)
-            except torch.OutOfMemoryError:
-                print("OUT OF VRAM Problem in Batch:", batch_paths)
-                exit(0)
-
-            # Now save if trigger present, OR if right stepcount
-            if tstate.global_step % args.gradient_accum == 0:
-                trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
-                if os.path.exists(trigger_path):
-                    print("trigger.checkpoint detected. ...")
-                    checkpointandsave(pipe, unet, accelerator, tstate)
-                    try:
-                        os.remove(trigger_path)
-                    except Exception as e:
-                        print("warning: got exception", e)
-
-                elif args.save_steps and (tstate.batch_count % args.save_steps == 0):
-                    if tstate.batch_count > 0 and tstate.batch_count >= int(args.save_start):
-                        print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
-                        checkpointandsave(pipe, unet, accelerator, tstate)
-
-        tstate.pbar.close()
-        if tstate.batch_count >= max_steps:
-            break
+    finally:
+        # Tear down the dataloader worker processes deterministically,
+        # before we tell the user (and the shell) that we're done - rather
+        # than leaving that to GC/atexit timing after the prompt is back.
+        print("Shutting down dataloader workers...")
+        mix_loader.shutdown()
+        signal.signal(signal.SIGINT, old_sigint_handler)
 
     if accelerator.is_main_process:
-        if tstate.tb_writer is not None:
-            tstate.tb_writer.close()
         if False:
             pipe.save_pretrained(args.output_dir, safe_serialization=True)
             sample_img(args, args.seed, args.output_dir,
                        custom_pipeline)
             print(f"finished:model saved to {args.output_dir}")
         else:
-            checkpointandsave(pipe, unet, accelerator, tstate)
+            checkpointandsave(pipe, unet, accelerator, tstate,
+                              optim=optim, lr_sched=lr_sched,
+                              save_training_state=True, tag="final")
+        if tstate.tb_writer is not None:
+            tstate.tb_writer.close()
 
 
 if __name__ == "__main__":
