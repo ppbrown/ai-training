@@ -5,6 +5,9 @@
 # --------------------------------------------------------------------------- #
 import argparse
 from argparse import BooleanOptionalAction
+import json
+import os
+import sys
 
 def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save after current batch")
@@ -40,6 +43,14 @@ def parse_args():
     p.add_argument("--save_steps",     type=int, help="Measured in effective batchsize(b * a)")
     p.add_argument("--save_start",     type=int, default=0, help="Dont start saving or samples until this step")
     p.add_argument("--save_on_epoch",  action="store_true")
+    p.add_argument("--continue_steps", type=int, default=0,
+                   help="Resume training for this many additional effective-batchsize steps. "
+                        "Exclusive: must be the only argument, e.g. 'train_from_cached.py "
+                        "--continue_steps 5000'. Must be run from the prior run's "
+                        "--output_dir; every other setting is read unchanged from "
+                        "./args.json there. The checkpoint to resume from is "
+                        "auto-detected under that directory, preferring final/ and "
+                        "falling back to interrupted/")
     p.add_argument("--force_toklen",   type=int, 
                    help="Force token length to a single value, like 256. Use for T5 cache")
 
@@ -126,7 +137,39 @@ def parse_args():
                    help="Just unfreeze, dont reinit.")
 
 
-    return p.parse_args()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--continue_steps":
+        if len(argv) != 2:
+            raise SystemExit("--continue_steps must be the only argument: --continue_steps N")
+        config_path = "args.json"
+        if not os.path.exists(config_path):
+            raise SystemExit(
+                "--continue_steps must be run from the prior run's top-level "
+                "directory (no ./args.json found in the current directory)"
+            )
+        with open(config_path) as f:
+            saved = json.load(f)
+        saved["output_dir"] = "."
+        saved["continue_steps"] = int(argv[1])
+        return argparse.Namespace(**saved)
+
+    args = p.parse_args(argv)
+    os.makedirs(args.output_dir, exist_ok=True)
+    config_path = os.path.join(args.output_dir, "args.json")
+    # Write to a temp file and rename over the real path: os.replace() is
+    # atomic (same filesystem, since both live under output_dir), so a
+    # mid-write crash can only leave a stray .tmp file, never a truncated
+    # args.json.
+    tmp_path = config_path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(vars(args), f, indent=2)
+        os.replace(tmp_path, config_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+    return args
 
 # Give an easy fast short way to invoke -h
 if __name__ == "__main__":
