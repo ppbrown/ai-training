@@ -28,6 +28,8 @@ def argproc():
     p.add_argument("--seed_device", type=str, choices=["cuda","cpu"],
                    help="Set to cpu if you are trying to do comparisons between cuda and cpu image")
     p.add_argument("--steps",  type=int, default=30)
+    p.add_argument("--cfg",  type=float, default=7.5,
+                   help="Classifier-free guidance scale")
     p.add_argument("--offload",  action="store_true", 
                    help="Use enable_sequential_cpu_offload()")
     p.add_argument("--prompt", nargs="+", 
@@ -121,7 +123,7 @@ else:
 
 print(f"Trying render of '{prompt}' using seed {seed}")
 
-images = pipe(prompt, num_inference_steps=args.steps, generator=generator).images
+images = pipe(prompt, num_inference_steps=args.steps, guidance_scale=args.cfg, generator=generator).images
 for i,image in enumerate(images):
     meta = PngImagePlugin.PngInfo()
     meta.add_text("Comment", f"prompt={prompt}")
