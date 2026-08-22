@@ -39,6 +39,10 @@ def parseargs():
                          " Zeros gradients for those channel rows/cols in encoder.conv_out,"
                          " quant_conv, post_quant_conv, decoder.conv_in."
                          " Cannot be combined with --freeze_all_channels.")
+    ap.add_argument("--freeze_encoder", action="store_true",
+                    help="Freeze the encoder (encoder + quant_conv) and train only the decoder.")
+    ap.add_argument("--freeze_decoder", action="store_true",
+                    help="Freeze the decoder (decoder + post_quant_conv) and train only the encoder.")
 
     ap.add_argument("--hires_tiling", action="store_true",
                     help="Presuming high res dataset, add additional 4x highres tile processing."
@@ -190,7 +194,14 @@ def parseargs():
                 "--continue_steps must be run from the prior run's top-level"
                 " directory (no ./config.json found in the current directory)"
             )
-        argv = ["--config", "config.json", "--output_dir", ".", "--model", "final",
+        model_dir = "final"
+        if not os.path.exists(os.path.join(model_dir, "training_state.pt")):
+            if os.path.exists(os.path.join("interruption_save", "training_state.pt")):
+                model_dir = "interruption_save"
+                print(f"--continue_steps: no final/training_state.pt found;"
+                      f" falling back to {model_dir}/")
+
+        argv = ["--config", "config.json", "--output_dir", ".", "--model", model_dir,
                 "--continue_steps", argv[1]]
 
     args = ap.parse_args(argv)
