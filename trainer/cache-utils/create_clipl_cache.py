@@ -29,7 +29,8 @@ def cli() -> argparse.Namespace:
     p.add_argument(
         "--model",
         default="runwayml/stable-diffusion-v1-5",
-        help="HF repo / local dir of a SD1.5/2.1 pipeline (CLIP text encoder)",
+        help="HF repo / local dir of a SD1.5/2.1 pipeline (CLIP text encoder)"
+            " [Needs to be a FULL model not just text_encoder]",
     )
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--ext", default="txt", help="Extension of caption file (no dot). Default: txt")
