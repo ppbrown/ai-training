@@ -15,6 +15,7 @@ Usage:
   --model MODEL   Diffusers model directory or repo (must have VAE)
   --custom        Look for custom pipeline in the model
   --writepreview  Write out a .webp file instead of displaying
+  --vae    flag
 
 """
 
@@ -23,17 +24,6 @@ from __future__ import annotations
 import sys
 import argparse
 from pathlib import Path
-
-import torch
-import safetensors.torch as st
-from diffusers import DiffusionPipeline, AutoencoderKL
-from torchvision.transforms.functional import to_pil_image
-
-if __name__ == "__main__":
-    # Only needed for the interactive Viewer; guarded so importing this
-    # module (e.g. for decode_latent_to_pil) doesn't require tkinter.
-    import tkinter as tk
-    from PIL import ImageTk
 
 
 # ---- config ----
@@ -61,6 +51,24 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Path(s) to VAE cache file(s) (.safetensors) containing key 'latent'",
     )
     return p
+
+
+if __name__ == "__main__":
+    # Parse args before the heavy imports below, so -h/--help and
+    # bad-arg errors return instantly.
+    args = build_argparser().parse_args()
+
+import torch
+import safetensors.torch as st
+from diffusers import DiffusionPipeline, AutoencoderKL
+from torchvision.transforms.functional import to_pil_image
+
+if __name__ == "__main__":
+    # Only needed for the interactive Viewer; guarded so importing this
+    # module (e.g. for decode_latent_to_pil) doesn't require tkinter.
+    import tkinter as tk
+    from PIL import ImageTk
+
 
 def load_latent(file_path: str):
     try:
@@ -191,9 +199,7 @@ def WritePreviews(vae_model, files: list[str]) -> list[Path]:
     return written
 
 
-def main():
-    args = build_argparser().parse_args()
-
+def main(args):
     print(f"Using model {args.model} on {len(args.files)} file(s)")
 
     vae_model = _load_vae_fp32(args.model, args.vae)
@@ -207,4 +213,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(args)
