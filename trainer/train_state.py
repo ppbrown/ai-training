@@ -29,11 +29,19 @@ class TrainState:
     epoch_count: int = 0
     total_epochs: int = 0
 
+    # adversarial (GAN) training. Both None unless --disc_weight > 0.
+    disc: Any = None
+    opt_d: Any = None
+
     # running accumulators (main-process only)
     accum_loss: float = 0.0
     accum_mse: float = 0.0
     accum_qk: float = 0.0
     accum_norm: float = 0.0
+    accum_gloss: float = 0.0
+    accum_dloss: float = 0.0
+    accum_dweight: float = 0.0
+    accum_dcount: int = 0
 
     # per-checkpoint artifact
     latent_paths: list[str] = field(default_factory=list)
@@ -47,3 +55,7 @@ class TrainState:
         self.accum_mse = 0.0
         self.accum_qk = 0.0
         self.accum_norm = 0.0
+        self.accum_gloss = 0.0
+        self.accum_dloss = 0.0
+        self.accum_dweight = 0.0
+        self.accum_dcount = 0

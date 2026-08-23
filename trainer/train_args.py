@@ -98,6 +98,35 @@ def parse_args():
     p.add_argument("--use_snr", action="store_true",
                    help="Use Min SNR noise adjustments")
 
+    p.add_argument("--disc_weight",   type=float, default=0.0,
+                   help="Enable 'Discriminator' (aka GAN based) loss on the UNet's"
+                        " implied clean latent. This is the fine-detail knob: plain MSE"
+                        " converges on the average of all plausible detail, which decodes"
+                        " to mush no matter how good the VAE is."
+                        " By default this multiplies an adaptive scale that matches the"
+                        " GAN gradient to the diffusion gradient entering the UNet"
+                        " (taming-transformers style); 0.5 is the usual LDM value.")
+    p.add_argument("--disc_no_adaptive", action="store_true",
+                   help="Use --disc_weight as a fixed scale on the generator loss"
+                        " instead of multiplying the adaptive gradient-ratio scale."
+                        " Start at 0.1 if you do.")
+    p.add_argument("--disc_start",    type=int,   default=0,
+                   help="Effective-batchsize step the discriminator kicks in at."
+                        " Default=0, which suits an already-sane model that just needs"
+                        " detail. Raise to a few thousand if pairing with --reinit_unet")
+    p.add_argument("--disc_lr",       type=float, default=2e-4,
+                   help="Default lr for GAN is 2e-4 (much higher than the UNet's)")
+    p.add_argument("--disc_layers",   type=int,   default=1,
+                   help="Patch receptive field, in LATENT pixels: 1=16, 2=34, 3=70."
+                        " Default=1. Deliberately lower than the VAE trainer's 3,"
+                        " because latents are already 8x downsampled, so 3 there would"
+                        " judge whole-frame composition instead of texture")
+    p.add_argument("--disc_max_noise", type=float, default=0.25,
+                   help="Only apply the GAN loss to samples at or below this normalized"
+                        " noise level (0=clean, 1=pure noise). Default=0.25. Fine detail"
+                        " is decided in the low-noise tail; above it the implied clean"
+                        " latent is too rough to be worth judging")
+
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")
     p.add_argument("--reinit_crossattn", action="store_true",
@@ -149,9 +178,15 @@ def parse_args():
             )
         with open(config_path) as f:
             saved = json.load(f)
-        saved["output_dir"] = "."
-        saved["continue_steps"] = int(argv[1])
-        return argparse.Namespace(**saved)
+        # An args.json written before a flag existed has no key for it, and
+        # the resulting Namespace would then AttributeError deep inside the
+        # training loop. Start from the parser's own defaults and let the
+        # saved values overwrite them, so old runs stay resumable.
+        merged = {a.dest: a.default for a in p._actions if a.dest != "help"}
+        merged.update(saved)
+        merged["output_dir"] = "."
+        merged["continue_steps"] = int(argv[1])
+        return argparse.Namespace(**merged)
 
     args = p.parse_args(argv)
     os.makedirs(args.output_dir, exist_ok=True)

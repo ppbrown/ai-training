@@ -20,6 +20,12 @@ def save_train_state(path, optim, lr_sched, tstate: TrainState):
         state["cuda_rng_state"] = torch.cuda.get_rng_state_all()
     if lr_sched is not None:
         state["scheduler"] = lr_sched.state_dict()
+    if tstate.disc is not None:
+        # Resuming with a freshly-initialized discriminator would hand the
+        # UNet a garbage adversarial signal for however long the
+        # discriminator takes to become competent again.
+        state["disc"] = tstate.disc.state_dict()
+        state["opt_d"] = tstate.opt_d.state_dict()
     torch.save(state, path)
     print(f"Saved training state: {path}")
 

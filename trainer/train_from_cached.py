@@ -287,6 +287,35 @@ def main():
         "parameters will be updated"
     )
 
+    # ----- discriminator (optional) ---------------------------------------- #
+    # Built here, deliberately BEFORE the RNG restore below: weight init
+    # consumes RNG, and doing it afterwards would knock a resumed run off
+    # the random walk it was on at checkpoint time.
+    disc = None
+    opt_d = None
+    if args.disc_weight > 0:
+        from train_discriminator import NLayerDiscriminator, weights_init
+        latent_ch = vae.config.latent_channels
+        disc = NLayerDiscriminator(
+            input_nc=latent_ch, ndf=64, n_layers=args.disc_layers,
+        ).apply(weights_init).to(device)
+        disc.train()
+        opt_d = torch.optim.AdamW(
+            disc.parameters(),
+            lr=args.disc_lr,
+            betas=(0.5, 0.9),
+            weight_decay=0.0,
+        )
+        if resume_state is not None and "disc" in resume_state:
+            disc.load_state_dict(resume_state["disc"])
+            opt_d.load_state_dict(resume_state["opt_d"])
+            print("Restored discriminator + opt_d state")
+        mode = "fixed" if args.disc_no_adaptive else "adaptive"
+        print(f"Latent discriminator enabled ({mode} weight {args.disc_weight}):"
+              f" {latent_ch}ch, {args.disc_layers} layer(s), lr={args.disc_lr}")
+        print(f"  Kicks in at step {args.disc_start},"
+              f" applied to noise levels <= {args.disc_max_noise}")
+
     # ----- load data, set training params ------------------------------------------------ #
 
     if resume_state is not None:
@@ -491,6 +520,8 @@ def main():
                         latent_scaling=latent_scaling,
                         noise_sched=noise_sched,
                         )
+    tstate.disc = disc
+    tstate.opt_d = opt_d
     if resume_state is not None:
         tstate.global_step = resume_state["global_step"]
         tstate.batch_count = resume_state["batch_count"]
