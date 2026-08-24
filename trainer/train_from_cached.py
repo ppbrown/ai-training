@@ -62,7 +62,7 @@ torch.backends.cudnn.benchmark = True
 
 from train_captiondata import CaptionImgDataset
 
-from train_utils import collate_fn, sample_img
+from train_utils import collate_fn, sample_img, sample_without_checkpoint
 
 
 #####################################################
@@ -607,6 +607,18 @@ def main():
                         if tstate.batch_count > 0 and tstate.batch_count >= int(args.save_start):
                             print(f"Saving @{tstate.batch_count:05} (save every {args.save_steps} steps)")
                             checkpointandsave(pipe, unet, accelerator, tstate)
+
+                    elif (args.sample_prompt and args.sample_steps
+                          and (tstate.batch_count % args.sample_steps == 0)):
+                        if tstate.batch_count > 0 and tstate.batch_count >= int(args.save_start):
+                            print(f"Sampling @{tstate.batch_count:05} (sample every {args.sample_steps} steps,"
+                                  " no checkpoint)")
+                            sample_dir = os.path.join(args.output_dir, "samples",
+                                                      f"step-{tstate.batch_count:05}")
+                            sample_without_checkpoint(pipe, unet, accelerator,
+                                                      args.sample_prompt, args.seed,
+                                                      args.sampler_steps, sample_dir,
+                                                      tstate.device)
 
             tstate.pbar.close()
             if tstate.batch_count >= max_steps:
