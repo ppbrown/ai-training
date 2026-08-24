@@ -40,7 +40,7 @@ def sample_img(args, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
         print(f"Saved {outname}")
 
 
-def sample_without_checkpoint(pipe, unet, accelerator, prompts, seed,
+def sample_without_checkpoint(pipe, unet, accelerator, tstate, prompts, seed,
                               sampler_steps, out_dir, device):
     """
     Render sample images straight from the in-memory training pipeline -
@@ -106,6 +106,16 @@ def sample_without_checkpoint(pipe, unet, accelerator, prompts, seed,
             outname = os.path.join(out_dir, fname)
             image.save(outname)
             print(f"Saved {outname}")
+
+        # Same bookkeeping checkpointandsave() does: record which cached
+        # latents were consumed since the last time this was flushed
+        # (whether that flush was a checkpoint save or a prior sample),
+        # then reset the rolling list.
+        savefile = os.path.join(out_dir, "latent_paths")
+        with open(savefile, "w") as f:
+            f.write('\n'.join(tstate.latent_paths) + '\n')
+        print("Wrote", len(tstate.latent_paths), "loglines to", savefile)
+        tstate.latent_paths = []
     finally:
         pipe.unet = pinned_unet
         pipe.scheduler = pinned_scheduler

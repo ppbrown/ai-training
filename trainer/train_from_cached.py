@@ -615,7 +615,7 @@ def main():
                                   " no checkpoint)")
                             sample_dir = os.path.join(args.output_dir, "samples",
                                                       f"step-{tstate.batch_count:05}")
-                            sample_without_checkpoint(pipe, unet, accelerator,
+                            sample_without_checkpoint(pipe, unet, accelerator, tstate,
                                                       args.sample_prompt, args.seed,
                                                       args.sampler_steps, sample_dir,
                                                       tstate.device)
