@@ -22,8 +22,8 @@ from PIL import Image
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Diffusers model directory or repo (must have VAE)")
-    parser.add_argument("--cache_file", required=True, help="Path to the latent .safetensors file")
-    parser.add_argument("--out_image", help="Optional: save output image to this path")
+    parser.add_argument("--cache_file", "-i", required=True, help="Path to the latent .safetensors file")
+    parser.add_argument("--out_image", "-o", help="Optional: save output image to this path")
     parser.add_argument("--scaling_factor", type=float, default=None, help="Override scaling factor (default: model's config)")
     parser.add_argument("--custom", action="store_true",help="Treat model as custom pipeline")
     args = parser.parse_args()
