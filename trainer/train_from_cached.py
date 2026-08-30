@@ -332,8 +332,10 @@ def main():
         mode = "fixed" if args.disc_no_adaptive else "adaptive"
         print(f"Pixel discriminator enabled ({mode} weight {args.disc_weight}):"
               f" 3ch RGB, {args.disc_layers} layer(s), lr={args.disc_lr}")
-        print(f"  Kicks in at step {args.disc_start},"
-              f" applied to noise levels <= {args.disc_max_noise}")
+        print(f"  Trains from step {args.disc_start};"
+              f" steers the UNet from step {args.disc_start + args.disc_warmup}"
+              f" (warmup {args.disc_warmup})")
+        print(f"  Applied to noise levels <= {args.disc_max_noise}")
 
     # ----- load data, set training params ------------------------------------------------ #
 

@@ -111,9 +111,11 @@ def parse_args():
                         " instead of multiplying the adaptive gradient-ratio scale."
                         " Start at 0.1 if you do.")
     p.add_argument("--disc_start",    type=int,   default=0,
-                   help="Effective-batchsize step the discriminator kicks in at."
-                        " Default=0, which suits an already-sane model that just needs"
-                        " detail. Raise to a few thousand if pairing with --reinit_unet")
+                   help="Effective-batchsize step the discriminator starts TRAINING at."
+                        " Default=0")
+    p.add_argument("--disc_warmup",   type=int,   default=500,
+                   help="Steps after --disc_start where the discriminator trains but the"
+                        " UNet gets no adversarial gradient. Default=500")
     p.add_argument("--disc_lr",       type=float, default=2e-4,
                    help="Default lr for GAN is 2e-4 (much higher than the UNet's)")
     p.add_argument("--disc_layers",   type=int,   default=2,

@@ -63,14 +63,43 @@ disc_weight:
 
 disc_start:
     Measured in effective-batchsize steps (tstate.batch_count), same unit
-    as --save_steps and --max_steps. Before it, the discriminator is not
-    trained at all - it just sits at its random init.
+    as --save_steps and --max_steps. Before it NOTHING adversarial runs -
+    the discriminator is not even trained, it just sits at its random
+    init. Note the difference from disc_warmup below.
     Default 0, because the normal use of this is a model that already
     trains sanely and only needs fine detail. If you are combining it with
     --reinit_unet or a heavy --reinit_*, set it to a few thousand so the
     UNet gets basic structure back before the discriminator has an
     opinion. Starting adversarial training against a model that cannot
     yet produce structure is the classic way to collapse it.
+
+disc_warmup:
+    Steps after disc_start during which the discriminator trains ALONE:
+    it sees real vs fake and updates every step, but g_loss is not added
+    to the UNet's loss. Default 500.
+    Why this is not optional: at disc_start the critic is at random init,
+    and with the adaptive weight on, its opinion is rescaled to carry the
+    same gradient norm as the diffusion loss. A random critic's noise
+    therefore arrives at FULL strength. The warmup is what buys it an
+    opinion worth that weight.
+    Why the default is generous rather than minimal: the failure it
+    guards against is asymmetric. The first feature a fresh critic finds
+    here is a high-frequency energy deficit, which is the right coarse
+    signal - but a UNet can satisfy "add high frequencies" with GRAIN
+    rather than with structure. Engaging too early buys a model that
+    looks sharper without having learned anything, and per this project's
+    history the tail MSE will not tell you that happened. Warmup steps are
+    cheap (train_core skips the grad-carrying decode and both
+    adaptive-weight passes), so overshooting costs little and
+    undershooting costs a checkpoint series.
+    Tuning it for real: set it absurdly high, say 5000, and watch
+    disc/d_loss in tensorboard. At random init it sits at almost exactly
+    1.0, since both hinge terms are relu(1 +/- ~0). Take the point where
+    it has clearly left 1.0 and the slope has bent - not the point where
+    it bottoms out, which just means the critic has solved a fake
+    distribution the UNet is about to move off.
+    disc/g_loss reads 0 for the whole warmup and jumps when it ends, so
+    the transition is visible on the graph.
 
 disc_max_noise:
     THIS IS THE ONE THAT MATTERS for fine detail. Normalized noise level,

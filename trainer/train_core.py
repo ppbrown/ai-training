@@ -140,9 +140,15 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
         # VAE trainer does.
         # See train_discriminator.py for the reasoning and tuning notes.
         disc_pair = None
+        g_loss = None
         if tstate.disc is not None:
             d_weight = adopt_weight(args.disc_weight, tstate.batch_count,
                                     threshold=args.disc_start)
+            # Warmup: the discriminator trains, but the UNet does not listen
+            # yet. A freshly-initialized critic's opinion is close to noise,
+            # and the adaptive weight would hand that noise the same gradient
+            # norm as the diffusion loss. See train_discriminator.py.
+            d_warmup = tstate.batch_count < args.disc_start + args.disc_warmup
             if d_weight > 0:
                 # Only judge the low-noise tail. Higher up the schedule the
                 # implied clean latent is a rough guess at global layout,
@@ -150,18 +156,24 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                 level = noise_level(noise_sched, timesteps, sigmas)
                 keep = (level <= args.disc_max_noise).nonzero(as_tuple=True)[0]
                 if keep.numel() > 0:
-                    x0_pred = predict_x0(noise_sched, noisy_latents,
-                                         model_pred, timesteps, sigmas)
-
                     # The cached latents were multiplied by latent_scaling
                     # on load; the decoder wants them unscaled.
                     inv_scale = 1.0 / tstate.latent_scaling
 
-                    # Decoded WITH grad: this is the path the adversarial
-                    # gradient takes back into the UNet. The VAE's own
-                    # parameters have requires_grad False, so nothing lands
-                    # on the decoder itself.
-                    fake = tstate.vae.decode(x0_pred[keep] * inv_scale).sample
+                    # Decoded WITH grad once warmup is over: that is the path
+                    # the adversarial gradient takes back into the UNet. The
+                    # VAE's own parameters have requires_grad False, so
+                    # nothing lands on the decoder itself.
+                    # During warmup nothing reaches the UNet, so we skip
+                    # building the graph at all. That decoder pass, plus the
+                    # two adaptive-weight traversals of it, is very nearly
+                    # the whole cost of this block - which is what makes a
+                    # long warmup affordable.
+                    with torch.set_grad_enabled(not d_warmup):
+                        x0_pred = predict_x0(noise_sched, noisy_latents,
+                                             model_pred, timesteps, sigmas)
+                        fake = tstate.vae.decode(
+                            x0_pred[keep] * inv_scale).sample
 
                     with torch.no_grad():
                         # Decode the REAL LATENT, not the source jpg. Both
@@ -171,25 +183,28 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                         real = tstate.vae.decode(
                             latents[keep].float() * inv_scale).sample
 
-                    # Freeze the discriminator's own weights for this pass.
-                    # Gradient still flows THROUGH it into fake and back
-                    # into the UNet; it just never lands on the
-                    # discriminator itself.
-                    tstate.disc.requires_grad_(False)
-                    g_loss = generator_hinge_loss(tstate.disc(fake))
+                    if not d_warmup:
+                        # Freeze the discriminator's own weights for this
+                        # pass. Gradient still flows THROUGH it into fake and
+                        # back into the UNet; it just never lands on the
+                        # discriminator itself.
+                        tstate.disc.requires_grad_(False)
+                        g_loss = generator_hinge_loss(tstate.disc(fake))
 
-                    if args.disc_no_adaptive:
-                        scale = d_weight
-                    else:
-                        scale = d_weight * calculate_adaptive_weight(
-                            loss, g_loss, model_pred, index=keep)
-                    loss = loss + scale * g_loss
+                        if args.disc_no_adaptive:
+                            scale = d_weight
+                        else:
+                            scale = d_weight * calculate_adaptive_weight(
+                                loss, g_loss, model_pred, index=keep)
+                        loss = loss + scale * g_loss
+                        tstate.accum_gloss += g_loss.item()
+                        tstate.accum_dweight += float(scale)
 
                     # Held back for the discriminator's own update below.
                     # Both detached: the UNet must get nothing from d_loss.
+                    # This happens during warmup too - training the critic is
+                    # the entire point of that phase.
                     disc_pair = (real.detach(), fake.detach())
-                    tstate.accum_gloss += g_loss.item()
-                    tstate.accum_dweight += float(scale)
                     tstate.accum_dcount += 1
 
         if args.scale_loss_with_accum:
@@ -238,7 +253,10 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                    f" raw: {raw_mse_loss.item():.3f}"
                    f" lr: {current_lr:.1e}")
         if disc_pair is not None:
-            postfix += f" g: {g_loss.item():.2f} d: {d_loss.item():.2f}"
+            # g_loss is None while the discriminator is still warming up.
+            if g_loss is not None:
+                postfix += f" g: {g_loss.item():.2f}"
+            postfix += f" d: {d_loss.item():.2f}"
         tstate.pbar.set_postfix_str(postfix)
 
     # Accelerate will make sure this only gets called on full-batch boundaries
