@@ -30,6 +30,21 @@ def save_train_state(path, optim, lr_sched, tstate: TrainState):
     print(f"Saved training state: {path}")
 
 
+def save_disc_state(path, tstate: TrainState):
+    """
+    Save the discriminator and its optimizer on their own.
+
+    save_train_state() also carries these, but that only gets written for
+    tag=final/interrupted and only gets read back by --continue_steps.
+    Starting a fresh run from an ordinary checkpoint-NNNNN directory would
+    otherwise begin with a randomly-initialized discriminator handing the
+    UNet a garbage adversarial signal until it becomes competent again.
+    """
+    torch.save({"disc": tstate.disc.state_dict(),
+                "opt_d": tstate.opt_d.state_dict()}, path)
+    print(f"Saved discriminator state: {path}")
+
+
 def checkpointandsave(pipe, unet, accelerator, tstate: TrainState,
                       optim=None, lr_sched=None,
                       save_training_state=False, tag=None,
@@ -77,6 +92,9 @@ def checkpointandsave(pipe, unet, accelerator, tstate: TrainState,
         f.close()
     print("Wrote", len(tstate.latent_paths), "loglines to", savefile)
     tstate.latent_paths = []
+
+    if tstate.disc is not None:
+        save_disc_state(os.path.join(ckpt_dir, "disc_state.pt"), tstate)
 
     if save_training_state:
         save_train_state(os.path.join(ckpt_dir, "training_state.pt"),

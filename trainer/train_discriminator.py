@@ -1,37 +1,44 @@
 """
 train_discriminator.py
 
-Latent-space PatchGAN discriminator + hinge losses for adversarial UNet
+Pixel-space PatchGAN discriminator + hinge losses for adversarial UNet
 training.
 
 This is the diffusion-trainer sibling of vae/train_discriminator.py.
 Same hinge losses, same taming-transformers adaptive weight, same hard
-adopt_weight delay, same flag names. Three things had to change, and all
-three are forced by where this one operates:
+adopt_weight delay, same flag names, and - since the port off latents -
+the same RGB input. Two things still differ, and both are forced by where
+this one sits in the pipeline:
 
-  1. It discriminates VAE LATENTS, not RGB pixels.
-     This trainer never sees pixels. CaptionImgDataset only hands out
-     paths to pre-cached latents, so producing an image to discriminate
-     would mean a full VAE decode with grad on every microbatch, for the
-     fake AND the real. Latent-space discrimination is what SD3-Turbo /
-     LADD settled on for exactly this reason, and it works at least as
-     well as the pixel version.
-
-  2. It discriminates x0_pred, not the raw model output.
+  1. It discriminates x0_pred, not the raw model output.
      The VAE hands its discriminator a reconstruction directly. There is
      no equivalent here: the UNet emits noise (or velocity), and noise
      has no texture to judge. So we analytically invert the noising step
-     to recover the clean latent the model is implying, and discriminate
-     THAT against the real cached latent. See predict_x0().
+     to recover the clean latent the model is implying, unscale it, and
+     decode it to RGB. See predict_x0(), and the adversarial block in
+     train_core.py for the decode itself.
 
-  3. It only fires on low-noise samples. See disc_max_noise below.
+  2. It only fires on low-noise samples. See disc_max_noise below.
+
+REAL SIDE - decoded latent, not the source jpg:
+    train_core decodes the cached REAL LATENT for the real half of the
+    pair, rather than loading the original image. Both halves then carry
+    an identical VAE round trip, which removes the round trip as a
+    confounder: the discriminator has no decoder artifact to latch onto
+    and has to actually judge texture. (This trainer could not load the
+    jpg anyway - CaptionImgDataset only hands out cache paths.)
 
 WHY THIS HELPS AT ALL, given the decoder is frozen:
     MSE on epsilon converges to the CONDITIONAL MEAN latent, and the mean
     of every plausible fine detail is mush. The decoder is then faithfully
     decoding mush. The discriminator is what pushes the prediction off the
-    mean and back onto the real-latent manifold, which is where texture
-    lives. The creativity gets reintroduced in the UNet, not the decoder.
+    mean and back onto the real manifold, which is where texture lives.
+    The creativity gets reintroduced in the UNet, not the decoder.
+
+COST:
+    The fake decode carries grad, so it is the expensive part of the step.
+    Only the samples passing disc_max_noise get decoded (~25% at the 0.25
+    default), and the real side runs under no_grad.
 """
 
 # -----------------------------------------------------------------------
@@ -88,15 +95,16 @@ disc_lr:
     different from the UNet optimizer's betas.
 
 disc_layers:
-    Receptive field, counted in LATENT pixels. At an 8x VAE, multiply by
-    8 for image pixels:
-      1 -> 16 latent px (~128 image px). DEFAULT, and the right one here.
-      2 -> 34 latent px (~272 image px).
-      3 -> 70 latent px (~560 image px, i.e. the whole frame at 512).
-    Note this default differs from the VAE trainer's 3. The VAE
-    discriminates at full image resolution, so 3 layers is local there.
-    Here the input is already 8x downsampled, so 3 layers would judge
-    global composition instead of texture - the opposite of what we want.
+    Receptive field, counted in IMAGE pixels, same as the VAE trainer now
+    that this operates on RGB:
+      1 -> 16 px. Below the scale of the features we care about.
+      2 -> 34 px. DEFAULT. About one eye at mid-distance portrait scale
+           (eye ~40px, iris ~20px in a 512 frame), which is the target.
+      3 -> 70 px.
+    Note this default differs from the VAE trainer's 3. That is the VAE's
+    whole-image setting; a 70px patch spans most of a face here and
+    averages the eye back into its surroundings - re-diluting exactly the
+    detail this whole path exists to sharpen.
 
 BatchNorm vs GroupNorm:
     The VAE version uses BatchNorm2d. This one uses GroupNorm, because
@@ -152,23 +160,21 @@ def weights_init(m):
 
 class NLayerDiscriminator(nn.Module):
     """
-    PatchGAN discriminator, operating on VAE latents.
+    PatchGAN discriminator, operating on decoded RGB.
 
-    Judges overlapping local patches rather than the whole latent map, so
-    it is sensitive to local texture rather than global plausibility -
-    which is exactly what we want, since global plausibility is already
-    the MSE term's job.
+    Judges overlapping local patches rather than the whole image, so it is
+    sensitive to local texture rather than global plausibility - which is
+    exactly what we want, since global plausibility is already the MSE
+    term's job.
 
     Args:
-        input_nc:   Number of input channels. This is the VAE's
-                    latent_channels, NOT 3. (16 for the Flux VAE, 4 for
-                    the original SD one.)
+        input_nc:   Number of input channels. 3, for RGB.
         ndf:        Base number of filters (64 is standard).
         n_layers:   Number of stride-2 conv layers. See the disc_layers
-                    tuning note for the receptive fields; 1 is the
-                    default in latent space.
+                    tuning note for the receptive fields; 2 is the
+                    default.
     """
-    def __init__(self, input_nc: int, ndf: int = 64, n_layers: int = 1):
+    def __init__(self, input_nc: int, ndf: int = 64, n_layers: int = 2):
         super().__init__()
 
         def norm(ch):
@@ -340,12 +346,16 @@ def calculate_adaptive_weight(
         express. Everything downstream of it - including conv_out's own
         weight gradient - is a linear function of what we measure here.
 
-        Consequences, all of them good: these two autograd.grad calls now
-        traverse a handful of elementwise ops and the tiny discriminator,
-        never the UNet. Gradient checkpointing becomes irrelevant rather
-        than incompatible, the cost drops from "double the backward" to
-        negligible, and the balance no longer depends on conv_out being
+        Consequences: these two autograd.grad calls never touch the UNet.
+        Gradient checkpointing becomes irrelevant rather than
+        incompatible, and the balance no longer depends on conv_out being
         unfrozen, so partial --unfreeze_* runs need no special case.
+
+        Not free, though, since the port to pixel space: the g_loss call
+        has to traverse the VAE decoder to reach model_pred, so it costs
+        one extra decoder backward per microbatch that has surviving
+        samples. --disc_no_adaptive skips both calls entirely if that
+        turns out to matter more than the balancing does.
 
     index:
         Optional subset of batch elements that the adversarial term

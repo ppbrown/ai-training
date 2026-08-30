@@ -100,9 +100,9 @@ def parse_args():
 
     p.add_argument("--disc_weight",   type=float, default=0.0,
                    help="Enable 'Discriminator' (aka GAN based) loss on the UNet's"
-                        " implied clean latent. This is the fine-detail knob: plain MSE"
-                        " converges on the average of all plausible detail, which decodes"
-                        " to mush no matter how good the VAE is."
+                        " implied clean latent, decoded to RGB. This is the fine-detail"
+                        " knob: plain MSE converges on the average of all plausible"
+                        " detail, which decodes to mush no matter how good the VAE is."
                         " By default this multiplies an adaptive scale that matches the"
                         " GAN gradient to the diffusion gradient entering the UNet"
                         " (taming-transformers style); 0.5 is the usual LDM value.")
@@ -116,11 +116,11 @@ def parse_args():
                         " detail. Raise to a few thousand if pairing with --reinit_unet")
     p.add_argument("--disc_lr",       type=float, default=2e-4,
                    help="Default lr for GAN is 2e-4 (much higher than the UNet's)")
-    p.add_argument("--disc_layers",   type=int,   default=1,
-                   help="Patch receptive field, in LATENT pixels: 1=16, 2=34, 3=70."
-                        " Default=1. Deliberately lower than the VAE trainer's 3,"
-                        " because latents are already 8x downsampled, so 3 there would"
-                        " judge whole-frame composition instead of texture")
+    p.add_argument("--disc_layers",   type=int,   default=2,
+                   help="Patch receptive field, in IMAGE pixels: 1=16, 2=34, 3=70."
+                        " Default=2, which is roughly one eye at mid-distance"
+                        " portrait scale. 3 is the VAE trainer's whole-image setting"
+                        " and re-dilutes exactly the detail this is meant to sharpen")
     p.add_argument("--disc_max_noise", type=float, default=0.25,
                    help="Only apply the GAN loss to samples at or below this normalized"
                         " noise level (0=clean, 1=pure noise). Default=0.25. Fine detail"

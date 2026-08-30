@@ -33,6 +33,10 @@ class TrainState:
     disc: Any = None
     opt_d: Any = None
 
+    # Frozen VAE, needed to decode latents to RGB for the pixel-space
+    # discriminator. Set by main; unused when --disc_weight is 0.
+    vae: Any = None
+
     # running accumulators (main-process only)
     accum_loss: float = 0.0
     accum_mse: float = 0.0

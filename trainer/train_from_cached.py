@@ -248,6 +248,13 @@ def main():
     if args.gradient_checkpointing:
         print("Enabling gradient checkpointing in UNet")
         pipe.unet.enable_gradient_checkpointing()
+        if args.disc_weight > 0:
+            # Only worth doing when the discriminator is on. That is the
+            # one path that backprops through the decoder; everywhere else
+            # the VAE runs under no_grad, where checkpointing saves nothing
+            # and just costs a recompute.
+            print("Enabling gradient checkpointing in VAE decoder")
+            pipe.vae.enable_gradient_checkpointing()
 
     if args.vae_scaling_factor:
         pipe.vae.config.scaling_factor = args.vae_scaling_factor
@@ -295,9 +302,9 @@ def main():
     opt_d = None
     if args.disc_weight > 0:
         from train_discriminator import NLayerDiscriminator, weights_init
-        latent_ch = vae.config.latent_channels
+        # 3, not latent_channels: this discriminator judges decoded RGB.
         disc = NLayerDiscriminator(
-            input_nc=latent_ch, ndf=64, n_layers=args.disc_layers,
+            input_nc=3, ndf=64, n_layers=args.disc_layers,
         ).apply(weights_init).to(device)
         disc.train()
         opt_d = torch.optim.AdamW(
@@ -310,9 +317,21 @@ def main():
             disc.load_state_dict(resume_state["disc"])
             opt_d.load_state_dict(resume_state["opt_d"])
             print("Restored discriminator + opt_d state")
+        else:
+            # An ordinary run started from a checkpoint dir has no
+            # training_state.pt, but every checkpoint now carries a
+            # disc_state.pt. Without this the UNet spends the first stretch
+            # of every such run being judged by a random discriminator.
+            disc_path = os.path.join(model_path, "disc_state.pt")
+            if os.path.exists(disc_path):
+                dstate = torch.load(disc_path, map_location="cpu",
+                                    weights_only=False)
+                disc.load_state_dict(dstate["disc"])
+                opt_d.load_state_dict(dstate["opt_d"])
+                print("Restored discriminator + opt_d state from", disc_path)
         mode = "fixed" if args.disc_no_adaptive else "adaptive"
-        print(f"Latent discriminator enabled ({mode} weight {args.disc_weight}):"
-              f" {latent_ch}ch, {args.disc_layers} layer(s), lr={args.disc_lr}")
+        print(f"Pixel discriminator enabled ({mode} weight {args.disc_weight}):"
+              f" 3ch RGB, {args.disc_layers} layer(s), lr={args.disc_lr}")
         print(f"  Kicks in at step {args.disc_start},"
               f" applied to noise levels <= {args.disc_max_noise}")
 
@@ -522,6 +541,7 @@ def main():
                         )
     tstate.disc = disc
     tstate.opt_d = opt_d
+    tstate.vae = vae
     if resume_state is not None:
         tstate.global_step = resume_state["global_step"]
         tstate.batch_count = resume_state["batch_count"]

@@ -134,7 +134,10 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
         # MSE alone converges on the conditional MEAN latent, and the mean
         # of every plausible fine detail is mush - which the VAE then
         # decodes faithfully as mush. This term pushes the prediction back
-        # onto the real-latent manifold, where the texture lives.
+        # onto the real manifold, where the texture lives.
+        # The judging happens in PIXEL space: the implied clean latent is
+        # decoded to RGB and the discriminator looks at that, same as the
+        # VAE trainer does.
         # See train_discriminator.py for the reasoning and tuning notes.
         disc_pair = None
         if tstate.disc is not None:
@@ -149,8 +152,24 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                 if keep.numel() > 0:
                     x0_pred = predict_x0(noise_sched, noisy_latents,
                                          model_pred, timesteps, sigmas)
-                    fake = x0_pred[keep]
-                    real = latents[keep].float()
+
+                    # The cached latents were multiplied by latent_scaling
+                    # on load; the decoder wants them unscaled.
+                    inv_scale = 1.0 / tstate.latent_scaling
+
+                    # Decoded WITH grad: this is the path the adversarial
+                    # gradient takes back into the UNet. The VAE's own
+                    # parameters have requires_grad False, so nothing lands
+                    # on the decoder itself.
+                    fake = tstate.vae.decode(x0_pred[keep] * inv_scale).sample
+
+                    with torch.no_grad():
+                        # Decode the REAL LATENT, not the source jpg. Both
+                        # sides then carry an identical VAE round trip, so
+                        # the discriminator cannot win by learning to spot
+                        # decoder artifacts instead of judging texture.
+                        real = tstate.vae.decode(
+                            latents[keep].float() * inv_scale).sample
 
                     # Freeze the discriminator's own weights for this pass.
                     # Gradient still flows THROUGH it into fake and back
