@@ -175,20 +175,16 @@ def build_rows(series, steps, tail_frac):
 
 # (key, header, format). Columns with no data at all are dropped.
 COLUMNS = [
-    ("ckpt", "ckpt", "{}"),
     ("step", "step", "{}"),
     ("loss", "loss", "{:.4f}"),
     ("tail", "tail", "{:.4f}"),
     ("d%", "d%", "{:+.1f}"),
-    ("min", "min", "{:.4f}"),
     ("std", "std", "{:.4f}"),
     ("snr", "snrloss", "{:.4f}"),
     ("gnorm", "gnorm", "{:.3g}"),
     ("qk", "qkgrad", "{:.2e}"),
     ("lr", "lr", "{:.2e}"),
-    ("L2", "L2", "{:.1f}"),
-    ("dL2%", "dL2%", "{:+.2f}"),
-    ("n", "n", "{}"),
+    ("L2", "L2", "{:.3f}"),
 ]
 
 
@@ -308,11 +304,12 @@ def main():
         print(f"unet L2 norm drift over run: {drift:+.2f}%{note}")
 
     print()
-    print("cols: loss/min/std over steps since previous checkpoint;"
-          " tail=mean of last")
-    print(f"      {args.tail_frac:.0%} of that window; d%=tail vs previous"
-          " checkpoint tail;")
-    print("      gnorm/qkgrad=mean grad norms; n=train steps in window")
+    print("cols: loss/min/std over steps since previous checkpoint")
+    print(f"   tail=mean of last{args.tail_frac:.0%} of that window")
+    print("   d%=tail vs previous checkpoint tail")
+    print("   std=loss volatility since last checkpoint (not how low it is, how noisy it is)")
+    print("   gnorm/qkgrad=mean grad norms")
+    print("   L2=unet weight size at checkpoint - growth signals overfitting/decay needed")
 
 
 if __name__ == "__main__":
