@@ -595,11 +595,24 @@ def main():
                         raise KeyboardInterrupt
 
                     trigger_path = os.path.join(args.output_dir, "trigger.checkpoint")
+                    numbered_trigger = os.path.join(
+                        args.output_dir,
+                        f"trigger.checkpoint.{tstate.batch_count:05}")
+
                     if os.path.exists(trigger_path):
                         print("trigger.checkpoint detected. ...")
                         checkpointandsave(pipe, unet, accelerator, tstate)
                         try:
                             os.remove(trigger_path)
+                        except Exception as e:
+                            print("warning: got exception", e)
+
+                    elif os.path.exists(numbered_trigger):
+                        print(f"{os.path.basename(numbered_trigger)} "
+                              f"matched current step.")
+                        checkpointandsave(pipe, unet, accelerator, tstate)
+                        try:
+                            os.remove(numbered_trigger)
                         except Exception as e:
                             print("warning: got exception", e)
 
