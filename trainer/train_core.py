@@ -185,10 +185,13 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                     # the whole cost of this block - which is what makes a
                     # long warmup affordable.
                     with torch.set_grad_enabled(not d_warmup):
+                        # predict_x0() is fp32 regardless of compute dtype (see
+                        # its own docstring); cast to the VAE's actual dtype
+                        # here since --bf16 can make that bf16 too.
                         x0_pred = predict_x0(noise_sched, noisy_latents,
                                              model_pred, timesteps, sigmas)
                         fake = tstate.vae.decode(
-                            x0_pred[keep] * inv_scale).sample
+                            (x0_pred[keep] * inv_scale).to(tstate.vae.dtype)).sample
 
                     with torch.no_grad():
                         # Decode the REAL LATENT, not the source jpg. Both
@@ -196,7 +199,7 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                         # the discriminator cannot win by learning to spot
                         # decoder artifacts instead of judging texture.
                         real = tstate.vae.decode(
-                            latents[keep].float() * inv_scale).sample
+                            (latents[keep].float() * inv_scale).to(tstate.vae.dtype)).sample
 
                     if not d_warmup:
                         # Freeze the discriminator's own weights for this

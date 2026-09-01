@@ -14,14 +14,12 @@ def parse_args():
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
     p.add_argument("--bf16", action="store_true",
-                   help="Opposite of --fp32: cast the UNet itself (weights, optimizer state, "
-                        "gradients) to pure bf16, instead of the default fp32-master-weights "
-                        "plus bf16-autocast mixed precision. Roughly halves UNet+optimizer "
-                        "VRAM, which is what buys headroom for a larger --batch_size. VAE and "
-                        "text encoder stay fp32 regardless (frozen, and VAE decode is "
-                        "numerically fragile below fp32). WARNING: at low --learning_rate this "
-                        "can silently stall training -- see the message printed at startup "
-                        "when this is active.")
+                   help="Opposite of --fp32: load and run the whole pipeline (UNet, VAE, text "
+                        "encoder) in pure bf16, instead of the default fp32-master-weights plus "
+                        "bf16-autocast mixed precision. Roughly halves model+optimizer VRAM, "
+                        "which is what buys headroom for a larger --batch_size. WARNING: at low "
+                        "--learning_rate this can silently stall training -- see the message "
+                        "printed at startup when this is active.")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
     p.add_argument("--allow_tf32", action="store_true",
