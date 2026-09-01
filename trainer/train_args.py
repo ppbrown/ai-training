@@ -13,6 +13,15 @@ def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save after current batch")
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
+    p.add_argument("--bf16", action="store_true",
+                   help="Opposite of --fp32: cast the UNet itself (weights, optimizer state, "
+                        "gradients) to pure bf16, instead of the default fp32-master-weights "
+                        "plus bf16-autocast mixed precision. Roughly halves UNet+optimizer "
+                        "VRAM, which is what buys headroom for a larger --batch_size. VAE and "
+                        "text encoder stay fp32 regardless (frozen, and VAE decode is "
+                        "numerically fragile below fp32). WARNING: at low --learning_rate this "
+                        "can silently stall training -- see the message printed at startup "
+                        "when this is active.")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
     p.add_argument("--allow_tf32", action="store_true",
@@ -195,6 +204,8 @@ def parse_args():
         return argparse.Namespace(**merged)
 
     args = p.parse_args(argv)
+    if args.fp32 and args.bf16:
+        raise SystemExit("--fp32 and --bf16 are mutually exclusive")
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "args.json")
     # Write to a temp file and rename over the real path: os.replace() is
