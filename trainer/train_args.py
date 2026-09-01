@@ -100,18 +100,17 @@ def parse_args():
 
     p.add_argument("--disc_weight",   type=float, default=0.0,
                    help="Enable 'Discriminator' (aka GAN based) loss on the UNet's"
-                        " implied clean latent, decoded to RGB. This is the fine-detail"
-                        " knob: plain MSE converges on the average of all plausible"
-                        " detail, which decodes to mush no matter how good the VAE is."
-                        " By default this multiplies an adaptive scale that matches the"
-                        " GAN gradient to the diffusion gradient entering the UNet"
-                        " (taming-transformers style); 0.5 is the usual LDM value.")
+                        " generated latent, decoded to PixelSpace. "
+                        " This is the fine detail knob."
+                        " WARNING: using this means you lose VAE compression."
+                        " Your latent images now take up typically x8 more VRAM!!!")
     p.add_argument("--disc_no_adaptive", action="store_true",
                    help="Use --disc_weight as a fixed scale on the generator loss"
                         " instead of multiplying the adaptive gradient-ratio scale."
                         " Start at 0.1 if you do.")
     p.add_argument("--disc_start",    type=int,   default=0,
-                   help="Effective-batchsize step the discriminator starts TRAINING at."
+                   help="Effective-batchsize step the discriminator starts self-training at."
+                        " Use this when your initial model is not reasonably clean."
                         " Default=0")
     p.add_argument("--disc_warmup",   type=int,   default=500,
                    help="Steps after --disc_start where the discriminator trains but the"
@@ -128,6 +127,11 @@ def parse_args():
                         " noise level (0=clean, 1=pure noise). Default=0.25. Fine detail"
                         " is decided in the low-noise tail; above it the implied clean"
                         " latent is too rough to be worth judging")
+
+    p.add_argument("--disc_decode_batch", type=int, default=3,
+                   help="How many qualifying samples per microbatch get decoded"
+                        " and judged. Exact, not a max: microbatches with fewer"
+                        " get skipped. Default=3")
 
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")

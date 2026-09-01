@@ -335,7 +335,8 @@ def main():
         print(f"  Trains from step {args.disc_start};"
               f" steers the UNet from step {args.disc_start + args.disc_warmup}"
               f" (warmup {args.disc_warmup})")
-        print(f"  Applied to noise levels <= {args.disc_max_noise}")
+        print(f"  Applied to noise levels <= {args.disc_max_noise},"
+              f" {args.disc_decode_batch} samples per microbatch")
 
     # ----- load data, set training params ------------------------------------------------ #
 

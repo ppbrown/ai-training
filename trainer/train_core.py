@@ -155,7 +155,22 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                 # and the epsilon inversion amplifies its error badly.
                 level = noise_level(noise_sched, timesteps, sigmas)
                 keep = (level <= args.disc_max_noise).nonzero(as_tuple=True)[0]
-                if keep.numel() > 0:
+                # Fixed decode batch: take exactly N qualifying samples, or
+                # skip this microbatch entirely. keep.numel() is a binomial
+                # draw, and letting it through raw hands the VAE decoder a
+                # different input shape almost every step. Two things go wrong
+                # with that. cudnn.benchmark (enabled in train_from_cached)
+                # re-tunes every conv in the decoder for each unseen shape,
+                # which stalls for minutes once VRAM is tight. And peak VRAM
+                # tracks that same shape, so it becomes a dice roll that can
+                # OOM hundreds of steps into an otherwise healthy run.
+                # Slicing rather than sampling is deliberate: timesteps are
+                # drawn i.i.d. per sample, so position in the microbatch
+                # carries no information about noise level, and slicing
+                # consumes no RNG - which would otherwise knock a resumed run
+                # off the random walk it was on at checkpoint time.
+                if keep.numel() >= args.disc_decode_batch:
+                    keep = keep[:args.disc_decode_batch]
                     # The cached latents were multiplied by latent_scaling
                     # on load; the decoder wants them unscaled.
                     inv_scale = 1.0 / tstate.latent_scaling
@@ -199,6 +214,7 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                         loss = loss + scale * g_loss
                         tstate.accum_gloss += g_loss.item()
                         tstate.accum_dweight += float(scale)
+                        tstate.last_gloss = g_loss.item()
 
                     # Held back for the discriminator's own update below.
                     # Both detached: the UNet must get nothing from d_loss.
@@ -228,6 +244,7 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             d_loss = hinge_d_loss(tstate.disc(real), tstate.disc(fake))
             (d_loss / args.gradient_accum).backward()
             tstate.accum_dloss += d_loss.item()
+            tstate.last_dloss = d_loss.item()
 
     # -----logging & ckp save  ----------------------------------------- #
     if accelerator.is_main_process:
@@ -252,11 +269,22 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
         postfix = (f" l: {loss.item():.3f}"
                    f" raw: {raw_mse_loss.item():.3f}"
                    f" lr: {current_lr:.1e}")
-        if disc_pair is not None:
-            # g_loss is None while the discriminator is still warming up.
-            if g_loss is not None:
-                postfix += f" g: {g_loss.item():.2f}"
-            postfix += f" d: {d_loss.item():.2f}"
+        # Sticky rather than tied to this microbatch: --disc_decode_batch
+        # skips microbatches without enough qualifying samples, and a field
+        # that vanishes every other step shifts the rest of the line with it.
+        # g stays absent for the whole of disc_warmup, so its first
+        # appearance still marks the switch to adversarial training.
+        if tstate.last_gloss is not None:
+            postfix += f" g: {tstate.last_gloss:.2f}"
+        if tstate.last_dloss is not None:
+            # Contributing microbatches so far in this accumulation window.
+            # Printed before the sync_gradients block below calls
+            # reset_accums(), so the last microbatch of a window shows the
+            # full tally. Right-aligned to the width of gradient_accum, so
+            # this field cannot change size either.
+            w = len(str(args.gradient_accum))
+            postfix += (f" d: {tstate.last_dloss:.2f}"
+                        f" ({tstate.accum_dcount:>{w}}/{args.gradient_accum})")
         tstate.pbar.set_postfix_str(postfix)
 
     # Accelerate will make sure this only gets called on full-batch boundaries

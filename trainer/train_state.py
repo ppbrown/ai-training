@@ -47,6 +47,15 @@ class TrainState:
     accum_dweight: float = 0.0
     accum_dcount: int = 0
 
+    # Last seen discriminator losses, for the progress bar only.
+    # --disc_decode_batch skips any microbatch without enough qualifying
+    # samples, so the critic sits idle on a good fraction of steps. Letting
+    # the pbar fields appear and vanish on those makes the whole line jump.
+    # These are at most a couple of microbatches stale, and deliberately
+    # NOT cleared by reset_accums().
+    last_gloss: float | None = None
+    last_dloss: float | None = None
+
     # per-checkpoint artifact
     latent_paths: list[str] = field(default_factory=list)
 
