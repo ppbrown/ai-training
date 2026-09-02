@@ -120,7 +120,16 @@ def main():
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
-        mixed_precision="no" if args.fp32 else "bf16",
+        # Accelerate's mixed_precision autocast wraps the model's forward
+        # with ConvertOutputsToFp32, forcibly upcasting its return value to
+        # fp32 regardless of the model's own parameter dtype. That's the
+        # point in the default mode (fp32 master weights), but under --bf16
+        # the model is already natively bf16 everywhere, and that forced
+        # upcast just reintroduces an fp32 tensor into an otherwise uniform
+        # bf16 pipeline (e.g. it broke sample_without_checkpoint()'s call
+        # into a stock diffusers pipeline, whose denoising loop then handed
+        # fp32 latents to a bf16 VAE and crashed on decode).
+        mixed_precision="no" if (args.fp32 or args.bf16) else "bf16",
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
@@ -319,12 +328,33 @@ def main():
               f"~{lr_floor:.1e} rounds away to nothing (frozen, not slow) "
               f"instead of accumulating.")
         margin = args.learning_rate / lr_floor if lr_floor > 0 else float("inf")
-        if args.optimizer in ("opt_lion", "py_lion", "d_lion"):
-            # Lion's step is exactly sign(momentum) * lr for every weight,
-            # every step -- unlike AdamW's variance-normalized step, there's
-            # no adaptive scaling that might occasionally cross the floor
-            # anyway. So this is a hard pass/fail against the actual
-            # --learning_rate, not a "likely" statement.
+        if args.optimizer == "opt_lion":
+            # torch-optimi's Lion auto-enables Kahan (compensated) summation
+            # whenever a param's dtype is fp16/bf16 (see optimi/lion.py):
+            # each step's rounding error is banked in a compensation buffer
+            # and fed back in on the next step, instead of being discarded.
+            # That is the actual fix for the floor above, not a workaround --
+            # sub-floor updates accumulate over steps rather than vanishing.
+            print(f"--optimizer opt_lion: torch-optimi auto-enables Kahan "
+                  f"summation for bf16 params, which banks each step's "
+                  f"rounding error and re-applies it next step instead of "
+                  f"discarding it. The {lr_floor:.1e} floor above mostly "
+                  f"does not apply here -- this is the safer Lion choice "
+                  f"for --bf16, no extra flag needed.")
+        elif args.optimizer in ("py_lion", "d_lion"):
+            # Neither has any Kahan-style compensation: lion_pytorch's update
+            # is a single `p.data.add_(update, alpha=-dlr)` on whatever dtype
+            # p already is, and dadaptation's DAdaptLion (dadapt_lion.py) is
+            # the same shape (`torch.zeros_like(p)` for its exp_avg/s state,
+            # no dtype override, same bare `p.data.add_`). Confirmed against
+            # the installed packages -- both run fine on bf16 params (no
+            # crash), they just get the full floor risk below with nothing
+            # to counteract it. Either way, Lion's step is exactly
+            # sign(momentum) * lr for every weight, every step -- unlike
+            # AdamW's variance-normalized step, there's no adaptive scaling
+            # that might occasionally cross the floor anyway. So this is a
+            # hard pass/fail against the actual --learning_rate, not a
+            # "likely" statement.
             if args.learning_rate >= lr_floor:
                 print(f"--optimizer {args.optimizer}: step is exactly +/-lr per "
                       f"weight, so this is a hard threshold. Your "
