@@ -36,6 +36,7 @@ a bit fancy and do something like
     find ../../topsrc -name '*jpg' | prog /new/dir/top
 """
 
+import argparse
 import os
 import sys
 import hashlib
@@ -44,8 +45,52 @@ import shutil
 import subprocess
 import json
 
-# Allow setting of destdir by arg, or env var
-DESTDIR = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DESTDIR", "")
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="dataset2hex.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Convert a disorganized set of images/etc, such as those downloaded "
+            "by dataset2img, into a more deterministic hex based naming format.\n"
+            "This will have the side effect of deduplication. Very useful for a "
+            "large dataset2img set.\n\n"
+            "Pass in a list of img files on stdin, and make sure to have a json "
+            "file matching each img file, that contains an md5 checksum of the "
+            "image (see jsonupdatemd5.py).\n\n"
+            "It will create a symlink (or hardlink, if src/dest are on the same "
+            "filesystem) from an appropriate cache dir under DESTDIR to the "
+            "original source image, and link any matching .json/.txt files."
+        ),
+        epilog=(
+            "example:\n"
+            "  mkdir /new/dir\n"
+            "  find /path/to/topsrc -name '*jpg' | %(prog)s /new/dir\n\n"
+            "  # ac5345454543534.jpg -> /new/dir/ac/ac5345454543534.jpg\n\n"
+            "relative symlinks:\n"
+            "  mkdir /new/dir/top/tmpdir && cd /new/dir/top/tmpdir\n"
+            "  find ../../topsrc -name '*jpg' | %(prog)s /new/dir/top"
+        ),
+    )
+    parser.add_argument(
+        "destdir",
+        nargs="?",
+        default=os.environ.get("DESTDIR", ""),
+        help="top of the destination tree (or set $DESTDIR)",
+    )
+    parser.add_argument(
+        "--link-type",
+        choices=("auto", "hard", "soft"),
+        default="auto",
+        help="type of link to create: 'hard' or 'soft', or 'auto' to use hard "
+             "links when src and destdir share a filesystem, symlinks otherwise "
+             "(default: auto)",
+    )
+    args = parser.parse_args()
+    if not args.destdir:
+        parser.error("destdir is required (pass as an argument or set $DESTDIR)")
+    return args.destdir, args.link_type
+
+DESTDIR, LINK_TYPE = parse_args()
 
 def ensure_hash_dirs(destdir):
     for a in "0123456789abcdef":
@@ -90,8 +135,12 @@ def main():
     files = [line.strip() for line in sys.stdin if line.strip()]
     if not files:
         return
-    use_hardlink = os.stat(files[0]).st_dev == os.stat(DESTDIR).st_dev
-    print(f"{'Same' if use_hardlink else 'Different'} filesystem detected: using {'hard links' if use_hardlink else 'symlinks'}")
+    if LINK_TYPE == "auto":
+        use_hardlink = os.stat(files[0]).st_dev == os.stat(DESTDIR).st_dev
+        print(f"{'Same' if use_hardlink else 'Different'} filesystem detected: using {'hard links' if use_hardlink else 'symlinks'}")
+    else:
+        use_hardlink = LINK_TYPE == "hard"
+        print(f"Using {'hard links' if use_hardlink else 'symlinks'} (--link-type={LINK_TYPE})")
     for imgfile in files:
         basename = os.path.basename(imgfile)
         ext = os.path.splitext(basename)[1]
