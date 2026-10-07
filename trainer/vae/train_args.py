@@ -73,7 +73,8 @@ def parseargs():
                          " Only used with --use_ema.")
     ap.add_argument("--save_every", type=int, default=2000, help="Save checkpoint every N steps.")
     ap.add_argument("--seed", type=int, default=0, help="Random seed.")
-    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0")
+    ap.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0",
+                    help="can take full pipeline model or just vae. defaults to sdxl")
 
     ap.add_argument(
         "--optimizer",
