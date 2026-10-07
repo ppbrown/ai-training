@@ -17,12 +17,17 @@ def collate_fn(examples):
 def sample_img(args, seed, CHECKPOINT_DIR, PIPELINE_CODE_DIR):
     prompt = args.sample_prompt
     tqdm.write(f"Trying render of '{prompt}' using seed {seed} ..")
+    # Force a uniform dtype on reload. Without this, from_pretrained() loads
+    # each tensor in whatever dtype it was saved as, so any stray mixed-dtype
+    # tensor in the checkpoint (e.g. a fp32 tensor amid an otherwise-bf16
+    # UNet) reproduces here as a dtype-mismatch crash on first use.
+    model_dtype = torch.bfloat16 if args.bf16 else torch.float32
     pipe = DiffusionPipeline.from_pretrained(
         CHECKPOINT_DIR,
         custom_pipeline=PIPELINE_CODE_DIR,
         use_safetensors=True,
         safety_checker=None, requires_safety_checker=False,
-        # torch_dtype=torch.bfloat16,
+        torch_dtype=model_dtype,
     )
     pipe.safety_checker = None
     pipe.set_progress_bar_config(disable=True)

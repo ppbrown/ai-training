@@ -13,6 +13,13 @@ def parse_args():
     p = argparse.ArgumentParser(epilog="Touch 'trigger.checkpoint' in the output_dir to dynamically trigger checkpoint save after current batch")
     p.add_argument("--fp32", action="store_true",
                    help="Override default mixed precision fp32/bf16, to force everything full fp32")
+    p.add_argument("--bf16", action="store_true",
+                   help="Opposite of --fp32: load and run the whole pipeline (UNet, VAE, text "
+                        "encoder) in pure bf16, instead of the default fp32-master-weights plus "
+                        "bf16-autocast mixed precision. Roughly halves model+optimizer VRAM, "
+                        "which is what buys headroom for a larger --batch_size. WARNING: at low "
+                        "--learning_rate this can silently stall training -- see the message "
+                        "printed at startup when this is active.")
     p.add_argument("--cpu_offload", action="store_true",
                    help="Enable cpu offload at pipe level")
     p.add_argument("--allow_tf32", action="store_true",
@@ -100,18 +107,17 @@ def parse_args():
 
     p.add_argument("--disc_weight",   type=float, default=0.0,
                    help="Enable 'Discriminator' (aka GAN based) loss on the UNet's"
-                        " implied clean latent, decoded to RGB. This is the fine-detail"
-                        " knob: plain MSE converges on the average of all plausible"
-                        " detail, which decodes to mush no matter how good the VAE is."
-                        " By default this multiplies an adaptive scale that matches the"
-                        " GAN gradient to the diffusion gradient entering the UNet"
-                        " (taming-transformers style); 0.5 is the usual LDM value.")
+                        " generated latent, decoded to PixelSpace. "
+                        " This is the fine detail knob."
+                        " WARNING: using this means you lose VAE compression."
+                        " Your latent images now take up typically x8 more VRAM!!!")
     p.add_argument("--disc_no_adaptive", action="store_true",
                    help="Use --disc_weight as a fixed scale on the generator loss"
                         " instead of multiplying the adaptive gradient-ratio scale."
                         " Start at 0.1 if you do.")
     p.add_argument("--disc_start",    type=int,   default=0,
-                   help="Effective-batchsize step the discriminator starts TRAINING at."
+                   help="Effective-batchsize step the discriminator starts self-training at."
+                        " Use this when your initial model is not reasonably clean."
                         " Default=0")
     p.add_argument("--disc_warmup",   type=int,   default=500,
                    help="Steps after --disc_start where the discriminator trains but the"
@@ -128,6 +134,31 @@ def parse_args():
                         " noise level (0=clean, 1=pure noise). Default=0.25. Fine detail"
                         " is decided in the low-noise tail; above it the implied clean"
                         " latent is too rough to be worth judging")
+
+    p.add_argument("--disc_decode_batch", type=int, default=3,
+                   help="How many qualifying samples per microbatch get decoded"
+                        " and judged. Exact, not a max: microbatches with fewer"
+                        " get skipped. Default=3")
+
+    p.add_argument("--vgg_weight",   type=float, default=0.0,
+                   help="Enable a raw VGG perceptual loss (L1 on frozen VGG16"
+                        " features) on the UNet's generated latent, decoded to"
+                        " PixelSpace -- same pixel-space conversion the GAN"
+                        " discriminator uses, but independent of --disc_weight."
+                        " 0.0 (default) disables it. This loss's own raw"
+                        " magnitude runs ~4-5 for a typical reconstruction"
+                        " (measured on real photos), versus ~0.1-0.2 for the"
+                        " diffusion MSE loss it's added to, so start around"
+                        " 0.02-0.05 to keep it a secondary signal -- see"
+                        " train_vgg.py's tuning notes for how that was measured.")
+    p.add_argument("--vgg_max_noise", type=float, default=0.25,
+                   help="Only apply the VGG loss to samples at or below this"
+                        " normalized noise level (0=clean, 1=pure noise)."
+                        " Same rationale as --disc_max_noise. Default=0.25")
+    p.add_argument("--vgg_decode_batch", type=int, default=3,
+                   help="How many qualifying samples per microbatch get decoded"
+                        " and judged. Exact, not a max: microbatches with fewer"
+                        " get skipped. Default=3")
 
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")
@@ -191,6 +222,8 @@ def parse_args():
         return argparse.Namespace(**merged)
 
     args = p.parse_args(argv)
+    if args.fp32 and args.bf16:
+        raise SystemExit("--fp32 and --bf16 are mutually exclusive")
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "args.json")
     # Write to a temp file and rename over the real path: os.replace() is

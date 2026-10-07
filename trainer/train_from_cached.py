@@ -45,7 +45,10 @@ from optimi import Lion  # torch-optimi pip module
 # Speed boost for fp32 training.
 # We give up "strict fp32 math", for an alleged negligable
 # accuracy difference, and 30% speed boost.
-if args.allow_tf32 == True:
+if args.allow_tf32 and args.bf16:
+    print("--allow_tf32 has no effect under --bf16 (all UNet compute is already"
+          " native bf16, not fp32); ignoring it")
+elif args.allow_tf32:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     print("Enabled TF32 for speed over precision")
@@ -86,7 +89,12 @@ def main():
     torch.manual_seed(args.seed)
     peak_lr = args.learning_rate
 
-    print("Training type:", "fp32" if args.fp32 else "mixed precision")
+    if args.fp32:
+        print("Training type: fp32")
+    elif args.bf16:
+        print("Training type: pure bf16 (whole pipeline, no fp32 master weights)")
+    else:
+        print("Training type: mixed precision (fp32 master weights, bf16 autocast)")
 
     resume_state = None
     resume_model_dir = None
@@ -107,12 +115,21 @@ def main():
         print(f"--continue_steps: resuming from batch {resume_state['batch_count']},"
               f" loading model from {resume_model_dir}")
 
-    model_dtype = torch.float32  # Always load master in full fp32
+    model_dtype = torch.bfloat16 if args.bf16 else torch.float32
     compute_dtype = torch.float32 if args.fp32 else torch.bfloat16  # runtime math dtype
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accum,
-        mixed_precision="no" if args.fp32 else "bf16",
+        # Accelerate's mixed_precision autocast wraps the model's forward
+        # with ConvertOutputsToFp32, forcibly upcasting its return value to
+        # fp32 regardless of the model's own parameter dtype. That's the
+        # point in the default mode (fp32 master weights), but under --bf16
+        # the model is already natively bf16 everywhere, and that forced
+        # upcast just reintroduces an fp32 tensor into an otherwise uniform
+        # bf16 pipeline (e.g. it broke sample_without_checkpoint()'s call
+        # into a stock diffusers pipeline, whose denoising loop then handed
+        # fp32 latents to a bf16 VAE and crashed on decode).
+        mixed_precision="no" if (args.fp32 or args.bf16) else "bf16",
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)]
     )
     device = accelerator.device
@@ -248,11 +265,11 @@ def main():
     if args.gradient_checkpointing:
         print("Enabling gradient checkpointing in UNet")
         pipe.unet.enable_gradient_checkpointing()
-        if args.disc_weight > 0:
-            # Only worth doing when the discriminator is on. That is the
-            # one path that backprops through the decoder; everywhere else
-            # the VAE runs under no_grad, where checkpointing saves nothing
-            # and just costs a recompute.
+        if args.disc_weight > 0 or args.vgg_weight > 0:
+            # Only worth doing when the discriminator and/or VGG loss is
+            # on. Those are the paths that backprop through the decoder;
+            # everywhere else the VAE runs under no_grad, where
+            # checkpointing saves nothing and just costs a recompute.
             print("Enabling gradient checkpointing in VAE decoder")
             pipe.vae.enable_gradient_checkpointing()
 
@@ -293,6 +310,90 @@ def main():
         f"Align-phase: {sum(p.numel() for p in trainable_params) / 1e6:.2f} M "
         "parameters will be updated"
     )
+
+    if args.bf16:
+        # bf16 rounds an in-place add back to the original value whenever
+        # it's smaller than ~half a ULP, i.e. ~0.4% of the weight's own
+        # magnitude. Measured over trainable_params specifically (matching
+        # log_unet_l2_norm()'s own requires_grad filter in train_utils.py),
+        # since frozen weights never get an optimizer step and don't belong
+        # in this floor at all.
+        n = sum(p.numel() for p in trainable_params)
+        sumsq = sum(p.detach().float().pow(2).sum().item() for p in trainable_params)
+        rms = (sumsq / n) ** 0.5
+        lr_floor = rms * 0.004
+
+        print(f"--bf16: trainable UNet weights have no fp32 master copy. Their "
+              f"per-weight RMS is ~{rms:.3g}, so any optimizer step below "
+              f"~{lr_floor:.1e} rounds away to nothing (frozen, not slow) "
+              f"instead of accumulating.")
+        margin = args.learning_rate / lr_floor if lr_floor > 0 else float("inf")
+        if args.optimizer == "opt_lion":
+            # torch-optimi's Lion auto-enables Kahan (compensated) summation
+            # whenever a param's dtype is fp16/bf16 (see optimi/lion.py):
+            # each step's rounding error is banked in a compensation buffer
+            # and fed back in on the next step, instead of being discarded.
+            # That is the actual fix for the floor above, not a workaround --
+            # sub-floor updates accumulate over steps rather than vanishing.
+            print(f"--optimizer opt_lion: torch-optimi auto-enables Kahan "
+                  f"summation for bf16 params, which banks each step's "
+                  f"rounding error and re-applies it next step instead of "
+                  f"discarding it. The {lr_floor:.1e} floor above mostly "
+                  f"does not apply here -- this is the safer Lion choice "
+                  f"for --bf16, no extra flag needed.")
+        elif args.optimizer in ("py_lion", "d_lion"):
+            # Neither has any Kahan-style compensation: lion_pytorch's update
+            # is a single `p.data.add_(update, alpha=-dlr)` on whatever dtype
+            # p already is, and dadaptation's DAdaptLion (dadapt_lion.py) is
+            # the same shape (`torch.zeros_like(p)` for its exp_avg/s state,
+            # no dtype override, same bare `p.data.add_`). Confirmed against
+            # the installed packages -- both run fine on bf16 params (no
+            # crash), they just get the full floor risk below with nothing
+            # to counteract it. Either way, Lion's step is exactly
+            # sign(momentum) * lr for every weight, every step -- unlike
+            # AdamW's variance-normalized step, there's no adaptive scaling
+            # that might occasionally cross the floor anyway. So this is a
+            # hard pass/fail against the actual --learning_rate, not a
+            # "likely" statement.
+            if args.learning_rate >= lr_floor:
+                print(f"--optimizer {args.optimizer}: step is exactly +/-lr per "
+                      f"weight, so this is a hard threshold. Your "
+                      f"--learning_rate={args.learning_rate:.1e} clears the "
+                      f"{lr_floor:.1e} floor ({margin:.1f}x), so updates should "
+                      f"register -- but that lr is well above Lion's usual tuned "
+                      f"range (typically 3-10x below an AdamW lr), so watch for "
+                      f"instability instead of the freeze.")
+            else:
+                print(f"--optimizer {args.optimizer}: step is exactly +/-lr per "
+                      f"weight, so this is a hard threshold, not a maybe. Your "
+                      f"--learning_rate={args.learning_rate:.1e} is only "
+                      f"{margin:.2f}x the {lr_floor:.1e} floor -- most of the "
+                      f"UNet WILL freeze outright under bf16. You would need "
+                      f"lr >= {lr_floor:.1e} to clear it, which is likely too "
+                      f"high for Lion to stay stable at this scale.")
+        elif args.optimizer in ("adamw", "adamw8"):
+            # Adam's step is lr * m_hat / (sqrt(v_hat) + eps), not an exact
+            # +/-lr like Lion's -- the ratio varies per weight with gradient
+            # noise, but empirically sits within about a factor of 1 of lr.
+            # So this is "expect trouble", not the hard guarantee Lion gets.
+            if args.learning_rate >= lr_floor:
+                print(f"--optimizer {args.optimizer}: step size (lr * m/sqrt(v)) "
+                      f"usually runs close to lr itself. Your "
+                      f"--learning_rate={args.learning_rate:.1e} clears the "
+                      f"{lr_floor:.1e} floor ({margin:.1f}x), so most weights "
+                      f"should get real updates.")
+            else:
+                print(f"--optimizer {args.optimizer}: step size (lr * m/sqrt(v)) "
+                      f"usually runs close to lr itself, not exactly it, so this "
+                      f"is a likelihood rather than the hard guarantee Lion gets. "
+                      f"Your --learning_rate={args.learning_rate:.1e} is only "
+                      f"{margin:.2f}x the {lr_floor:.1e} floor -- expect larger-"
+                      f"magnitude weights (norm/gain params near 1.0 especially, "
+                      f"since their floor scales with their own size) to freeze "
+                      f"first. Raise --learning_rate toward {lr_floor:.1e} or "
+                      f"above to avoid it.")
+        print(f"--batch_size {args.batch_size}: fewer steps/epoch means fewer "
+              f"chances to clear that floor per weight.")
 
     # ----- discriminator (optional) ---------------------------------------- #
     # Built here, deliberately BEFORE the RNG restore below: weight init
@@ -335,7 +436,16 @@ def main():
         print(f"  Trains from step {args.disc_start};"
               f" steers the UNet from step {args.disc_start + args.disc_warmup}"
               f" (warmup {args.disc_warmup})")
-        print(f"  Applied to noise levels <= {args.disc_max_noise}")
+        print(f"  Applied to noise levels <= {args.disc_max_noise},"
+              f" {args.disc_decode_batch} samples per microbatch")
+
+    vgg = None
+    if args.vgg_weight > 0:
+        from train_vgg import RawVGGLoss
+        vgg = RawVGGLoss().to(device)
+        print(f"Raw VGG perceptual loss enabled (weight {args.vgg_weight}):"
+              f" applied to noise levels <= {args.vgg_max_noise},"
+              f" {args.vgg_decode_batch} samples per microbatch")
 
     # ----- load data, set training params ------------------------------------------------ #
 
@@ -543,6 +653,7 @@ def main():
                         )
     tstate.disc = disc
     tstate.opt_d = opt_d
+    tstate.vgg = vgg
     tstate.vae = vae
     if resume_state is not None:
         tstate.global_step = resume_state["global_step"]

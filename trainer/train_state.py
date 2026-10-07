@@ -33,8 +33,12 @@ class TrainState:
     disc: Any = None
     opt_d: Any = None
 
-    # Frozen VAE, needed to decode latents to RGB for the pixel-space
-    # discriminator. Set by main; unused when --disc_weight is 0.
+    # Frozen raw-VGG perceptual loss. None unless --vgg_weight > 0.
+    vgg: Any = None
+
+    # Frozen VAE, needed to decode latents to RGB for pixel-space losses
+    # (GAN discriminator and/or raw-VGG). Set by main; unused unless one
+    # of --disc_weight/--vgg_weight is > 0.
     vae: Any = None
 
     # running accumulators (main-process only)
@@ -46,6 +50,18 @@ class TrainState:
     accum_dloss: float = 0.0
     accum_dweight: float = 0.0
     accum_dcount: int = 0
+    accum_vloss: float = 0.0
+    accum_vcount: int = 0
+
+    # Last seen discriminator/VGG losses, for the progress bar only.
+    # --disc_decode_batch/--vgg_decode_batch skip any microbatch without
+    # enough qualifying samples, so these sit idle on a good fraction of
+    # steps. Letting the pbar fields appear and vanish on those makes the
+    # whole line jump. These are at most a couple of microbatches stale,
+    # and deliberately NOT cleared by reset_accums().
+    last_gloss: float | None = None
+    last_dloss: float | None = None
+    last_vloss: float | None = None
 
     # per-checkpoint artifact
     latent_paths: list[str] = field(default_factory=list)
@@ -63,3 +79,5 @@ class TrainState:
         self.accum_dloss = 0.0
         self.accum_dweight = 0.0
         self.accum_dcount = 0
+        self.accum_vloss = 0.0
+        self.accum_vcount = 0

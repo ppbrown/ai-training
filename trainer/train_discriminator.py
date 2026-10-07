@@ -37,8 +37,8 @@ WHY THIS HELPS AT ALL, given the decoder is frozen:
 
 COST:
     The fake decode carries grad, so it is the expensive part of the step.
-    Only the samples passing disc_max_noise get decoded (~25% at the 0.25
-    default), and the real side runs under no_grad.
+    Exactly disc_decode_batch samples get decoded per contributing
+    microbatch, and the real side runs under no_grad.
 """
 
 # -----------------------------------------------------------------------
@@ -117,6 +117,28 @@ disc_max_noise:
     of each microbatch qualifies, so with batch_size 4 many microbatches
     contribute nothing. Gradient accumulation smooths this out; if you run
     accum 1 and batch_size 2, consider a larger cutoff.
+
+disc_decode_batch:
+    How many of the samples passing disc_max_noise actually get decoded
+    and judged. EXACT, not a maximum: a microbatch with fewer qualifying
+    samples is skipped entirely rather than decoded at a smaller size.
+    Default 3.
+    Why exact matters more than the number itself: keep.numel() is a
+    binomial draw (batch_size trials at roughly disc_max_noise
+    probability), so without this the VAE decoder sees a different input
+    shape almost every step. train_from_cached enables cudnn.benchmark,
+    which re-tunes every conv in the decoder for each unseen shape - a
+    multi-minute stall once VRAM is tight, recurring as rare draws show
+    up, and then again from scratch when warmup ends and the backward
+    algorithms need tuning too. Peak VRAM tracks the same shape, so it
+    becomes a dice roll: a run can survive hundreds of steps and then OOM
+    on an unlucky draw.
+    Picking it: at batch_size 16 and disc_max_noise 0.25 the draw has
+    mean 4, so 3 lets about 80% of microbatches contribute and 4 about
+    60%. Lower is cheaper and contributes more often; higher gives the
+    critic more pairs per opt_d step. If you want a larger N without
+    skipping most microbatches, raise batch_size or disc_max_noise
+    rather than this alone.
 
 disc_lr:
     Discriminator wants a much higher lr than the UNet (2e-4 vs 1e-5), and

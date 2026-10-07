@@ -32,7 +32,7 @@ mkdir -p "$OUTPUT_DIR"
 resize_image() {
   INPUT_FILE="$1"
   OUTPUT_FILE="$OUTPUT_DIR/$(basename "$INPUT_FILE")"
-  convert "$INPUT_FILE" -resize ${RES}x${RES}\! "$OUTPUT_FILE"
+  test -f $OUTPUT_FILE || convert "$INPUT_FILE" -resize ${RES}x${RES}\! "$OUTPUT_FILE"
   echo "Resized: $OUTPUT_FILE"
 }
 
