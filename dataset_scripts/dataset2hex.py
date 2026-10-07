@@ -48,6 +48,7 @@ import json
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="dataset2hex.py",
+        usage="%(prog)s [-h] [--link-type {auto,hard,soft}] destdir < list-of-img-files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Convert a disorganized set of images/etc, such as those downloaded "
