@@ -265,11 +265,11 @@ def main():
     if args.gradient_checkpointing:
         print("Enabling gradient checkpointing in UNet")
         pipe.unet.enable_gradient_checkpointing()
-        if args.disc_weight > 0:
-            # Only worth doing when the discriminator is on. That is the
-            # one path that backprops through the decoder; everywhere else
-            # the VAE runs under no_grad, where checkpointing saves nothing
-            # and just costs a recompute.
+        if args.disc_weight > 0 or args.vgg_weight > 0:
+            # Only worth doing when the discriminator and/or VGG loss is
+            # on. Those are the paths that backprop through the decoder;
+            # everywhere else the VAE runs under no_grad, where
+            # checkpointing saves nothing and just costs a recompute.
             print("Enabling gradient checkpointing in VAE decoder")
             pipe.vae.enable_gradient_checkpointing()
 
@@ -438,6 +438,14 @@ def main():
               f" (warmup {args.disc_warmup})")
         print(f"  Applied to noise levels <= {args.disc_max_noise},"
               f" {args.disc_decode_batch} samples per microbatch")
+
+    vgg = None
+    if args.vgg_weight > 0:
+        from train_vgg import RawVGGLoss
+        vgg = RawVGGLoss().to(device)
+        print(f"Raw VGG perceptual loss enabled (weight {args.vgg_weight}):"
+              f" applied to noise levels <= {args.vgg_max_noise},"
+              f" {args.vgg_decode_batch} samples per microbatch")
 
     # ----- load data, set training params ------------------------------------------------ #
 
@@ -645,6 +653,7 @@ def main():
                         )
     tstate.disc = disc
     tstate.opt_d = opt_d
+    tstate.vgg = vgg
     tstate.vae = vae
     if resume_state is not None:
         tstate.global_step = resume_state["global_step"]

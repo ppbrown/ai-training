@@ -226,6 +226,33 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                     disc_pair = (real.detach(), fake.detach())
                     tstate.accum_dcount += 1
 
+        # --- Raw VGG perceptual loss (optional) -------------------------- #
+        # Same pixel-space conversion as the discriminator block above
+        # (predict_x0 -> unscale -> decode), applied independently: its own
+        # noise-level cutoff and decode-batch size, no adaptive weighting,
+        # no warmup (VGG is a frozen pretrained net, not something that
+        # needs to earn an opinion first). See train_vgg.py.
+        if tstate.vgg is not None:
+            level = noise_level(noise_sched, timesteps, sigmas)
+            keep = (level <= args.vgg_max_noise).nonzero(as_tuple=True)[0]
+            if keep.numel() >= args.vgg_decode_batch:
+                keep = keep[:args.vgg_decode_batch]
+                inv_scale = 1.0 / tstate.latent_scaling
+
+                x0_pred = predict_x0(noise_sched, noisy_latents,
+                                     model_pred, timesteps, sigmas)
+                fake = tstate.vae.decode(
+                    (x0_pred[keep] * inv_scale).to(tstate.vae.dtype)).sample
+                with torch.no_grad():
+                    real = tstate.vae.decode(
+                        (latents[keep].float() * inv_scale).to(tstate.vae.dtype)).sample
+
+                vgg_loss = tstate.vgg(fake, real)
+                loss = loss + args.vgg_weight * vgg_loss
+                tstate.accum_vloss += vgg_loss.item()
+                tstate.accum_vcount += 1
+                tstate.last_vloss = vgg_loss.item()
+
         if args.scale_loss_with_accum:
             loss = loss / args.gradient_accum
 
@@ -288,6 +315,8 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             w = len(str(args.gradient_accum))
             postfix += (f" d: {tstate.last_dloss:.2f}"
                         f" ({tstate.accum_dcount:>{w}}/{args.gradient_accum})")
+        if tstate.last_vloss is not None:
+            postfix += f" v: {tstate.last_vloss:.3f}"
         tstate.pbar.set_postfix_str(postfix)
 
     # Accelerate will make sure this only gets called on full-batch boundaries
@@ -319,6 +348,11 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
                     tstate.tb_writer.add_scalar("disc/g_loss", tstate.accum_gloss / ndisc, tstate.batch_count)
                     tstate.tb_writer.add_scalar("disc/d_loss", tstate.accum_dloss / ndisc, tstate.batch_count)
                     tstate.tb_writer.add_scalar("disc/weight", tstate.accum_dweight / ndisc, tstate.batch_count)
+                if tstate.accum_vcount > 0:
+                    # Averaged over contributing microbatches only, same
+                    # reasoning as disc/* above: --vgg_max_noise means some
+                    # microbatches have no qualifying samples at all.
+                    tstate.tb_writer.add_scalar("vgg/loss", tstate.accum_vloss / tstate.accum_vcount, tstate.batch_count)
 
             tstate.reset_accums()
 
