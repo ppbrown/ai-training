@@ -140,6 +140,26 @@ def parse_args():
                         " and judged. Exact, not a max: microbatches with fewer"
                         " get skipped. Default=3")
 
+    p.add_argument("--vgg_weight",   type=float, default=0.0,
+                   help="Enable a raw VGG perceptual loss (L1 on frozen VGG16"
+                        " features) on the UNet's generated latent, decoded to"
+                        " PixelSpace -- same pixel-space conversion the GAN"
+                        " discriminator uses, but independent of --disc_weight."
+                        " 0.0 (default) disables it. This loss's own raw"
+                        " magnitude runs ~4-5 for a typical reconstruction"
+                        " (measured on real photos), versus ~0.1-0.2 for the"
+                        " diffusion MSE loss it's added to, so start around"
+                        " 0.02-0.05 to keep it a secondary signal -- see"
+                        " train_vgg.py's tuning notes for how that was measured.")
+    p.add_argument("--vgg_max_noise", type=float, default=0.25,
+                   help="Only apply the VGG loss to samples at or below this"
+                        " normalized noise level (0=clean, 1=pure noise)."
+                        " Same rationale as --disc_max_noise. Default=0.25")
+    p.add_argument("--vgg_decode_batch", type=int, default=3,
+                   help="How many qualifying samples per microbatch get decoded"
+                        " and judged. Exact, not a max: microbatches with fewer"
+                        " get skipped. Default=3")
+
     p.add_argument("--targetted_training", action="store_true",
                    help="Only train reset layers")
     p.add_argument("--reinit_crossattn", action="store_true",
