@@ -694,6 +694,11 @@ def main() -> None:
     os_cpu_count = Path("/proc/cpuinfo").read_text().count("processor") if Path("/proc/cpuinfo").exists() else 4
     num_workers = min(8, os_cpu_count)
 
+    # Fail cleanly on bad paths before any DataLoader workers are started.
+    for spec in args.dataset:
+        if not parse_dataset_spec(spec)[0].is_dir():
+            raise SystemExit(f"ERROR: dataset path is not a directory: {spec}")
+
     packs: List[LoaderPack] = []
     for spec in args.dataset:
         root, tw, th = parse_dataset_spec(spec)
