@@ -39,7 +39,10 @@ def parse_args():
     p.add_argument("--num_cycles",     type=float, help="Typically only used with cosine decay")
     p.add_argument("--min_sigma",      type=float, default=1e-5, 
                    help="For FlowMatch. Default=1e-5. If you are using effective batchsize <256, consider a higher value like 2e-4")
-    p.add_argument("--copy_config",    type=str, help="Config file to archive with training, if model load succeeds")
+    p.add_argument("--min_timestep",   type=int, default=0,
+                   help="Never train on timesteps below this (0-999 scale, 0=no limit). "
+                        "Skips the lowest-noise steps. Default=0")
+    p.add_argument("--copy_config",   type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
 
     p.add_argument("--batch_size",     type=int, default=4)
@@ -224,6 +227,8 @@ def parse_args():
     args = p.parse_args(argv)
     if args.fp32 and args.bf16:
         raise SystemExit("--fp32 and --bf16 are mutually exclusive")
+    if not 0 <= args.min_timestep < 999:
+        raise SystemExit("--min_timestep must be in [0, 998]")
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "args.json")
     # Write to a temp file and rename over the real path: os.replace() is
