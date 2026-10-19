@@ -27,8 +27,12 @@ class CaptionImgDataset(Dataset):
         extset = ("jpg", "png")
         for root in root_dirs:
             extra="" if unsupervised else f" and {txtcache_suffix}"
-            print(f"Scanning {root} for {imgcache_suffix}{extra}",
-                f"matching {extset}")
+            if skip_src_check:
+                print(f"Scanning {root} for {imgcache_suffix}{extra}",
+                      "(--skip_src_check: not requiring source images)")
+            else:
+                print(f"Scanning {root} for {imgcache_suffix}{extra}",
+                      f"matching {extset}")
             if not Path(root).exists():
                 print("\nERROR: nonexistent directory", root)
                 exit(1)
