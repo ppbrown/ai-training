@@ -22,7 +22,7 @@ class CaptionImgDataset(Dataset):
     """
     def __init__(self, root_dirs, batch_size,
                  imgcache_suffix=".img_cache", txtcache_suffix=".txt_t5cache",
-                 gradient_accum=1, unsupervised=False):
+                 gradient_accum=1, unsupervised=False, skip_src_check=False):
         self.files = []
         extset = ("jpg", "png")
         for root in root_dirs:
@@ -33,15 +33,23 @@ class CaptionImgDataset(Dataset):
                 print("\nERROR: nonexistent directory", root)
                 exit(1)
             subtotal=0
-            for ext in extset:
-                for p in Path(root).rglob(f"*.{ext}"):
-                    img_cache = p.with_suffix(imgcache_suffix)
-                    txt_cache = p.with_suffix(txtcache_suffix)
-                    # Only keep samples where BOTH caches exist
-                    if p.exists() and img_cache.exists():
-                        if unsupervised or txt_cache.exists():
-                            self.files.append((img_cache, txt_cache))
-                            subtotal+=1
+            if skip_src_check:
+                # Source img/txt may be absent: scan for img caches directly
+                for img_cache in Path(root).rglob(f"*{imgcache_suffix}"):
+                    txt_cache = img_cache.with_suffix(txtcache_suffix)
+                    if unsupervised or txt_cache.exists():
+                        self.files.append((img_cache, txt_cache))
+                        subtotal+=1
+            else:
+                for ext in extset:
+                    for p in Path(root).rglob(f"*.{ext}"):
+                        img_cache = p.with_suffix(imgcache_suffix)
+                        txt_cache = p.with_suffix(txtcache_suffix)
+                        # Only keep samples where BOTH caches exist
+                        if p.exists() and img_cache.exists():
+                            if unsupervised or txt_cache.exists():
+                                self.files.append((img_cache, txt_cache))
+                                subtotal+=1
             print(f"Cache pairs found: {subtotal}")
 
         if not self.files:

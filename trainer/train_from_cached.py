@@ -471,6 +471,7 @@ def main():
                                imgcache_suffix=args.imgcache_suffix,
                                gradient_accum=accum,
                                unsupervised=unsupervised,
+                               skip_src_check=args.skip_src_check,
                                )
 
         # Yes keep this using microbatch not effective batch size

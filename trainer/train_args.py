@@ -71,6 +71,7 @@ def parse_args():
     p.add_argument("--seed",        type=int, default=90)
     p.add_argument("--txtcache_suffix", type=str, default=".txt_t5cache", help="Default=.txt_t5cache")
     p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
+    p.add_argument("--skip_src_check", action="store_true", help="Only look for imgcache+txtcache pairs; do not require the original image/txt files to exist")
     p.add_argument("--force_txtcache", type=str, help="Force txt cache to be a single file. Useful for forcing cached null for unsupervised training")
 
     p.add_argument("--gradient_accum", type=int, default=1, help="Default=1")
