@@ -462,7 +462,8 @@ def main():
     dataloaders = []
     micro_steps_per_epoch = 0  # "micro" means "size directly run on gpu"
     ebs_steps_per_epoch = 0  # Effective-batch_size
-    unsupervised = True if args.force_txtcache else False
+    # With --random_unsupervised, real captions are still needed for the rest
+    unsupervised = bool(args.force_txtcache) and not args.random_unsupervised
     for dirs in args.train_data_dir:
         # remember, dirs can contain more than one dirname
         ds = CaptionImgDataset(dirs,

@@ -48,9 +48,13 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             print(batch_paths)
             exit(1)
 
+        # torch RNG (not python's) so a resumed run stays on its random walk
+        use_forced = bool(args.force_txtcache) and (
+            not args.random_unsupervised
+            or torch.rand(1).item() < args.random_unsupervised)
         embeds = []
         for cache_file in batch_paths["txt_cache"]:
-            if args.force_txtcache:
+            if use_forced:
                 cache_file = args.force_txtcache
             if Path(cache_file).suffix == ".h5":
                 raise NotImplementedError(cache_file, "not supported yet")

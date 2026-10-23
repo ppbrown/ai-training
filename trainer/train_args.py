@@ -73,6 +73,10 @@ def parse_args():
     p.add_argument("--imgcache_suffix", type=str, default=".img_sdvae", help="Default=.img_sdvae")
     p.add_argument("--skip_src_check", action="store_true", help="Only look for imgcache+txtcache pairs; do not require the original image/txt files to exist")
     p.add_argument("--force_txtcache", type=str, help="Force txt cache to be a single file. Useful for forcing cached null for unsupervised training")
+    p.add_argument("--random_unsupervised", type=float, default=0.0,
+                   help="Fraction of microbatches (0 <= x < 1) trained with the --force_txtcache"
+                        " embedding instead of their own captions. Requires --force_txtcache."
+                        " Default=0")
 
     p.add_argument("--gradient_accum", type=int, default=1, help="Default=1")
     p.add_argument('--gradient_checkpointing', action='store_true',
@@ -230,6 +234,10 @@ def parse_args():
         raise SystemExit("--fp32 and --bf16 are mutually exclusive")
     if not 0 <= args.min_timestep < 999:
         raise SystemExit("--min_timestep must be in [0, 998]")
+    if not 0 <= args.random_unsupervised < 1:
+        raise SystemExit("--random_unsupervised must be in [0, 1)")
+    if args.random_unsupervised and not args.force_txtcache:
+        raise SystemExit("--random_unsupervised requires --force_txtcache")
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "args.json")
     # Write to a temp file and rename over the real path: os.replace() is
