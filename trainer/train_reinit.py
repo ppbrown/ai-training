@@ -136,6 +136,18 @@ def unfreeze_attn2(unet):
             n += p.numel()
     print(f"[unfreeze_sd15_attn2] enabled {n/1e6:.2f} M params")
 
+# Apply AFTER all unfreezes, so they cannot undo it.
+def freeze_attn2(unet):
+    """
+    SD1.5: re-freeze cross-attention (attn2) and its pre-norm (norm2).
+    """
+    n = 0
+    for name, p in unet.named_parameters():
+        if ".transformer_blocks." in name and (".attn2." in name or ".norm2." in name):
+            p.requires_grad = False
+            n += p.numel()
+    print(f"[freeze_attn2] re-froze {n/1e6:.2f} M params")
+
 
 # I think "cross attention" is specifically for text emb mapping.
 # Whereas self attention is for interpreting latent noisy images

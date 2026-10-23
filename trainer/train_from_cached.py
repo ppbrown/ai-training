@@ -249,6 +249,15 @@ def main():
         print("Attempting to unfreeze attention layers of Unet")
         from train_reinit import unfreeze_all_attention
         unfreeze_all_attention(pipe.unet)
+
+    # Must stay last, so no unfreeze above can undo it
+    if args.realign_vae:
+        print("--realign_vae: training conv_in/conv_out, down blocks 0 1,"
+              " up blocks 2 3 (resnets + self-attn); cross-attention and its"
+              " norm stay frozen")
+    if args.freeze_attn2:
+        from train_reinit import freeze_attn2
+        freeze_attn2(pipe.unet)
     # ------------------------------------------ #
 
     if args.save_start > 0:

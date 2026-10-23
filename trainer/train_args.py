@@ -205,7 +205,15 @@ def parse_args():
                    "You may want to also use --unfreeze_in and --unfreeze_out")
     p.add_argument("--unfreeze_attn2", action="store_true",
                    help="Just unfreeze, dont reinit.")
-
+    p.add_argument("--freeze_attn2", action="store_true",
+                   help="Apply last: re-freeze cross-attention and its pre-norm in any unfrozen blocks")
+    p.add_argument("--realign_vae", action="store_true",
+                   help="Unsupervised realignment to a new VAE latent space. Implies "
+                        "--targetted_training --unfreeze_in --unfreeze_out "
+                        "--unfreeze_down_blocks 0 1 --unfreeze_up_blocks 2 3, then "
+                        "re-freezes all cross-attention (attn2) and its pre-norm so "
+                        "text-dependent weights are untouched. Use with null-caption "
+                        "data (--force_txtcache)")
 
     argv = sys.argv[1:]
     if argv and argv[0] == "--continue_steps":
@@ -238,6 +246,13 @@ def parse_args():
         raise SystemExit("--random_unsupervised must be in [0, 1)")
     if args.random_unsupervised and not args.force_txtcache:
         raise SystemExit("--random_unsupervised requires --force_txtcache")
+    if args.realign_vae:
+        args.targetted_training = True
+        args.unfreeze_in = True
+        args.unfreeze_out = True
+        args.unfreeze_down_blocks = [0, 1]
+        args.unfreeze_up_blocks = [2, 3]
+        args.freeze_attn2 = True
     os.makedirs(args.output_dir, exist_ok=True)
     config_path = os.path.join(args.output_dir, "args.json")
     # Write to a temp file and rename over the real path: os.replace() is
