@@ -164,6 +164,9 @@ def main():
 
     if args.force_txtcache:
         print("Forcing use of single txtcache file", args.force_txtcache)
+    if args.null_caption_cache:
+        print("Null caption cache file", args.null_caption_cache,
+              "used for fraction", args.random_unsupervised)
 
     if args.reinit_unet:
         print("Training Unet from scratch")
@@ -471,8 +474,9 @@ def main():
     dataloaders = []
     micro_steps_per_epoch = 0  # "micro" means "size directly run on gpu"
     ebs_steps_per_epoch = 0  # Effective-batch_size
-    # With --random_unsupervised, real captions are still needed for the rest
-    unsupervised = bool(args.force_txtcache) and not args.random_unsupervised
+    # --random_unsupervised uses --null_caption_cache, not force_txtcache,
+    # so real captions are still required for it
+    unsupervised = bool(args.force_txtcache)
     for dirs in args.train_data_dir:
         # remember, dirs can contain more than one dirname
         ds = CaptionImgDataset(dirs,
