@@ -42,7 +42,10 @@ def parse_args():
     p.add_argument("--min_timestep",   type=int, default=0,
                    help="Never train on timesteps below this (0-999 scale, 0=no limit). "
                         "Skips the lowest-noise steps. Default=0")
-    p.add_argument("--copy_config",   type=str, help="Config file to archive with training, if model load succeeds")
+    p.add_argument("--max_timestep",   type=int, default=999,
+                   help="Never train on timesteps above this (0-999 scale, 999=no limit). "
+                        "Skips the highest-noise steps. Default=999")
+    p.add_argument("--copy_config",  type=str, help="Config file to archive with training, if model load succeeds")
     p.add_argument("--output_dir",     required=True)
 
     p.add_argument("--batch_size",     type=int, default=4)
@@ -243,6 +246,8 @@ def parse_args():
         raise SystemExit("--fp32 and --bf16 are mutually exclusive")
     if not 0 <= args.min_timestep < 999:
         raise SystemExit("--min_timestep must be in [0, 998]")
+    if not args.min_timestep < args.max_timestep <= 999:
+        raise SystemExit("--max_timestep must be in (min_timestep, 999]")
     if not 0 <= args.random_unsupervised < 1:
         raise SystemExit("--random_unsupervised must be in [0, 1)")
     if args.random_unsupervised and not args.null_txt_cache:

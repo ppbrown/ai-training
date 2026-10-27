@@ -98,7 +98,8 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             noise = torch.randn_like(latents)
             bsz = latents.size(0)
             timesteps = torch.randint(
-                args.min_timestep, noise_sched.config.num_train_timesteps,
+                args.min_timestep,
+                min(args.max_timestep + 1, noise_sched.config.num_train_timesteps),
                 (bsz,), device=tstate.device, dtype=torch.long
             )
             noisy_latents = noise_sched.add_noise(latents, noise, timesteps)
@@ -111,7 +112,8 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
             noise = torch.randn_like(latents)
 
             lo = max(eps, args.min_timestep / 999.0)
-            s = torch.rand(bsz, device=tstate.device).mul_(1 - eps - lo).add_(lo)
+            hi = min(1 - eps, args.max_timestep / 999.0)
+            s = torch.rand(bsz, device=tstate.device).mul_(hi - lo).add_(lo)
             timesteps = s.to(torch.float32).mul(999.0)
 
             s = s.view(-1, *([1] * (latents.dim() - 1)))  # broadcasting [B,1,1,1]
