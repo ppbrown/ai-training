@@ -52,7 +52,7 @@ def train_micro_batch(unet, accelerator: Accelerator, batch_paths, tstate: Train
         forced_file = None
         if args.random_unsupervised:
             if torch.rand(1).item() < args.random_unsupervised:
-                forced_file = args.null_caption_cache
+                forced_file = args.null_txt_cache
         elif args.force_txtcache:
             forced_file = args.force_txtcache
         embeds = []

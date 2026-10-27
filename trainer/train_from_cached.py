@@ -164,8 +164,8 @@ def main():
 
     if args.force_txtcache:
         print("Forcing use of single txtcache file", args.force_txtcache)
-    if args.null_caption_cache:
-        print("Null caption cache file", args.null_caption_cache,
+    if args.null_txt_cache:
+        print("Null caption cache file", args.null_txt_cache,
               "used for fraction", args.random_unsupervised)
 
     if args.reinit_unet:
@@ -474,7 +474,7 @@ def main():
     dataloaders = []
     micro_steps_per_epoch = 0  # "micro" means "size directly run on gpu"
     ebs_steps_per_epoch = 0  # Effective-batch_size
-    # --random_unsupervised uses --null_caption_cache, not force_txtcache,
+    # --random_unsupervised uses --null_txt_cache, not force_txtcache,
     # so real captions are still required for it
     unsupervised = bool(args.force_txtcache)
     for dirs in args.train_data_dir:
